@@ -27,6 +27,8 @@ import java.lang.invoke.MethodHandle;
 
 import static com.facebook.presto.metadata.FunctionKind.SCALAR;
 import static com.facebook.presto.metadata.SqlScalarFunctionBuilder.constant;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.USE_NULL_FLAG;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static com.facebook.presto.spi.function.OperatorType.BETWEEN;
 import static com.facebook.presto.spi.function.OperatorType.EQUAL;
@@ -109,7 +111,8 @@ public class DecimalInequalityOperators
                 .returnType(parseTypeSignature(BOOLEAN))
                 .build();
         return SqlScalarFunction.builder(DecimalInequalityOperators.class)
-                .signature(signature);
+                .signature(signature)
+                .deterministic(true);
     }
 
     private static SqlScalarFunction binaryOperator(OperatorType operatorType, MethodHandle getResultMethodHandle)
@@ -136,8 +139,9 @@ public class DecimalInequalityOperators
     private static SqlScalarFunction distinctOperator()
     {
         return makeBinaryOperatorFunctionBuilder(IS_DISTINCT_FROM)
-                .nullableArguments(true, true)
-                .nullFlags(true, true)
+                .argumentProperties(
+                        valueTypeArgumentProperty(USE_NULL_FLAG),
+                        valueTypeArgumentProperty(USE_NULL_FLAG))
                 .implementation(b -> b
                         .methods("distinctShortShort", "distinctLongLong"))
                 .build();
@@ -189,6 +193,7 @@ public class DecimalInequalityOperators
                 .build();
         return SqlScalarFunction.builder(DecimalInequalityOperators.class)
                 .signature(signature)
+                .deterministic(true)
                 .implementation(b -> b
                         .methods("betweenShortShortShort", "betweenLongLongLong"))
                 .build();

@@ -13,12 +13,13 @@
  */
 package com.facebook.presto.orc.writer;
 
+import com.facebook.presto.orc.OrcEncoding;
 import com.facebook.presto.orc.checkpoint.BooleanStreamCheckpoint;
 import com.facebook.presto.orc.checkpoint.ByteArrayStreamCheckpoint;
 import com.facebook.presto.orc.checkpoint.LongStreamCheckpoint;
 import com.facebook.presto.orc.metadata.ColumnEncoding;
+import com.facebook.presto.orc.metadata.CompressedMetadataWriter;
 import com.facebook.presto.orc.metadata.CompressionKind;
-import com.facebook.presto.orc.metadata.MetadataWriter;
 import com.facebook.presto.orc.metadata.RowGroupIndex;
 import com.facebook.presto.orc.metadata.Stream;
 import com.facebook.presto.orc.metadata.Stream.StreamKind;
@@ -27,12 +28,12 @@ import com.facebook.presto.orc.metadata.statistics.SliceColumnStatisticsBuilder;
 import com.facebook.presto.orc.stream.ByteArrayOutputStream;
 import com.facebook.presto.orc.stream.LongOutputStream;
 import com.facebook.presto.orc.stream.PresentOutputStream;
+import com.facebook.presto.orc.stream.StreamDataOutput;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
-import io.airlift.slice.SliceOutput;
 import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
@@ -42,6 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 
+import static com.facebook.presto.orc.OrcEncoding.DWRF;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT_V2;
 import static com.facebook.presto.orc.metadata.CompressionKind.NONE;
@@ -69,14 +71,14 @@ public class SliceDirectColumnWriter
 
     private boolean closed;
 
-    public SliceDirectColumnWriter(int column, Type type, CompressionKind compression, int bufferSize, boolean isDwrf, Supplier<SliceColumnStatisticsBuilder> statisticsBuilderSupplier)
+    public SliceDirectColumnWriter(int column, Type type, CompressionKind compression, int bufferSize, OrcEncoding orcEncoding, Supplier<SliceColumnStatisticsBuilder> statisticsBuilderSupplier)
     {
         checkArgument(column >= 0, "column is negative");
         this.column = column;
         this.type = requireNonNull(type, "type is null");
         this.compressed = requireNonNull(compression, "compression is null") != NONE;
-        this.columnEncoding = new ColumnEncoding(isDwrf ? DIRECT : DIRECT_V2, 0);
-        this.lengthStream = createLengthOutputStream(compression, bufferSize, isDwrf);
+        this.columnEncoding = new ColumnEncoding(orcEncoding == DWRF ? DIRECT : DIRECT_V2, 0);
+        this.lengthStream = createLengthOutputStream(compression, bufferSize, orcEncoding);
         this.dataStream = new ByteArrayOutputStream(compression, bufferSize);
         this.presentStream = new PresentOutputStream(compression, bufferSize);
         this.statisticsBuilderSupplier = statisticsBuilderSupplier;
@@ -150,7 +152,7 @@ public class SliceDirectColumnWriter
     }
 
     @Override
-    public List<Stream> writeIndexStreams(SliceOutput outputStream, MetadataWriter metadataWriter)
+    public List<StreamDataOutput> getIndexStreams(CompressedMetadataWriter metadataWriter)
             throws IOException
     {
         checkState(closed);
@@ -170,8 +172,9 @@ public class SliceDirectColumnWriter
             rowGroupIndexes.add(new RowGroupIndex(positions, columnStatistics));
         }
 
-        int length = metadataWriter.writeRowIndexes(outputStream, rowGroupIndexes.build());
-        return ImmutableList.of(new Stream(column, StreamKind.ROW_INDEX, length, false));
+        Slice slice = metadataWriter.writeRowIndexes(rowGroupIndexes.build());
+        Stream stream = new Stream(column, StreamKind.ROW_INDEX, slice.length(), false);
+        return ImmutableList.of(new StreamDataOutput(slice, stream));
     }
 
     private static List<Integer> createSliceColumnPositionList(
@@ -188,16 +191,15 @@ public class SliceDirectColumnWriter
     }
 
     @Override
-    public List<Stream> writeDataStreams(SliceOutput outputStream)
-            throws IOException
+    public List<StreamDataOutput> getDataStreams()
     {
         checkState(closed);
 
-        ImmutableList.Builder<Stream> dataStreams = ImmutableList.builder();
-        presentStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        lengthStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        dataStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        return dataStreams.build();
+        ImmutableList.Builder<StreamDataOutput> outputDataStreams = ImmutableList.builder();
+        presentStream.getStreamDataOutput(column).ifPresent(outputDataStreams::add);
+        outputDataStreams.add(lengthStream.getStreamDataOutput(column));
+        outputDataStreams.add(dataStream.getStreamDataOutput(column));
+        return outputDataStreams.build();
     }
 
     @Override

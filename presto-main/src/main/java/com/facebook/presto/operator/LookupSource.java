@@ -30,6 +30,8 @@ public interface LookupSource
 
     long getJoinPositionCount();
 
+    long joinPositionWithinPartition(long joinPosition);
+
     long getJoinPosition(int position, Page hashChannelsPage, Page allChannelsPage, long rawHash);
 
     long getJoinPosition(int position, Page hashChannelsPage, Page allChannelsPage);
@@ -39,6 +41,8 @@ public interface LookupSource
     void appendTo(long position, PageBuilder pageBuilder, int outputChannelOffset);
 
     boolean isJoinPositionEligible(long currentJoinPosition, int probePosition, Page allProbeChannelsPage);
+
+    boolean isEmpty();
 
     @Override
     void close();

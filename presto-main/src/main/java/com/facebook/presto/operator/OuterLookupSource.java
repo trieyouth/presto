@@ -46,6 +46,12 @@ public final class OuterLookupSource
     }
 
     @Override
+    public boolean isEmpty()
+    {
+        return lookupSource.isEmpty();
+    }
+
+    @Override
     public int getChannelCount()
     {
         return lookupSource.getChannelCount();
@@ -61,6 +67,12 @@ public final class OuterLookupSource
     public long getInMemorySizeInBytes()
     {
         return lookupSource.getInMemorySizeInBytes();
+    }
+
+    @Override
+    public long joinPositionWithinPartition(long joinPosition)
+    {
+        return lookupSource.joinPositionWithinPartition(joinPosition);
     }
 
     @Override

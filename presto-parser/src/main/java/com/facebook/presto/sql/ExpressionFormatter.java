@@ -28,7 +28,9 @@ import com.facebook.presto.sql.tree.CharLiteral;
 import com.facebook.presto.sql.tree.CoalesceExpression;
 import com.facebook.presto.sql.tree.ComparisonExpression;
 import com.facebook.presto.sql.tree.Cube;
+import com.facebook.presto.sql.tree.CurrentPath;
 import com.facebook.presto.sql.tree.CurrentTime;
+import com.facebook.presto.sql.tree.CurrentUser;
 import com.facebook.presto.sql.tree.DecimalLiteral;
 import com.facebook.presto.sql.tree.DereferenceExpression;
 import com.facebook.presto.sql.tree.DoubleLiteral;
@@ -78,12 +80,16 @@ import com.facebook.presto.sql.tree.TryExpression;
 import com.facebook.presto.sql.tree.WhenClause;
 import com.facebook.presto.sql.tree.Window;
 import com.facebook.presto.sql.tree.WindowFrame;
+import com.google.common.base.CharMatcher;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.PrimitiveIterator;
 import java.util.Set;
@@ -93,15 +99,31 @@ import static com.facebook.presto.sql.SqlFormatter.formatSql;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.lang.String.format;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
 public final class ExpressionFormatter
 {
+    private static final ThreadLocal<DecimalFormat> doubleFormatter = ThreadLocal.withInitial(
+            () -> new DecimalFormat("0.###################E0###", new DecimalFormatSymbols(Locale.US)));
+
     private ExpressionFormatter() {}
 
     public static String formatExpression(Expression expression, Optional<List<Expression>> parameters)
     {
         return new Formatter(parameters).process(expression, null);
+    }
+
+    public static String formatQualifiedName(QualifiedName name)
+    {
+        return name.getParts().stream()
+                .map(ExpressionFormatter::formatIdentifier)
+                .collect(joining("."));
+    }
+
+    public static String formatIdentifier(String s)
+    {
+        return '"' + s.replace("\"", "\"\"") + '"';
     }
 
     public static class Formatter
@@ -141,6 +163,18 @@ public final class ExpressionFormatter
                     .append(process(node.getValue(), context))
                     .append(" AT TIME ZONE ")
                     .append(process(node.getTimeZone(), context)).toString();
+        }
+
+        @Override
+        protected String visitCurrentUser(CurrentUser node, Void context)
+        {
+            return "CURRENT_USER";
+        }
+
+        @Override
+        protected String visitCurrentPath(CurrentPath node, Void context)
+        {
+            return "CURRENT_PATH";
         }
 
         @Override
@@ -224,12 +258,13 @@ public final class ExpressionFormatter
         @Override
         protected String visitDoubleLiteral(DoubleLiteral node, Void context)
         {
-            return Double.toString(node.getValue());
+            return doubleFormatter.get().format(node.getValue());
         }
 
         @Override
         protected String visitDecimalLiteral(DecimalLiteral node, Void context)
         {
+            // TODO return node value without "DECIMAL '..'" when FeaturesConfig#parseDecimalLiteralsAsDouble switch is removed
             return "DECIMAL '" + node.getValue() + "'";
         }
 
@@ -315,15 +350,6 @@ public final class ExpressionFormatter
             return baseString + "." + process(node.getField());
         }
 
-        private static String formatQualifiedName(QualifiedName name)
-        {
-            List<String> parts = new ArrayList<>();
-            for (String part : name.getParts()) {
-                parts.add(formatIdentifier(part));
-            }
-            return Joiner.on('.').join(parts);
-        }
-
         @Override
         public String visitFieldReference(FieldReference node, Void context)
         {
@@ -345,7 +371,13 @@ public final class ExpressionFormatter
             }
 
             builder.append(formatQualifiedName(node.getName()))
-                    .append('(').append(arguments).append(')');
+                    .append('(').append(arguments);
+
+            if (node.getOrderBy().isPresent()) {
+                builder.append(' ').append(formatOrderBy(node.getOrderBy().get(), parameters));
+            }
+
+            builder.append(')');
 
             if (node.getFilter().isPresent()) {
                 builder.append(" FILTER ").append(visitFilter(node.getFilter().get(), context));
@@ -662,18 +694,12 @@ public final class ExpressionFormatter
                     .map((e) -> process(e, null))
                     .iterator());
         }
-
-        private static String formatIdentifier(String s)
-        {
-            // TODO: handle escaping properly
-            return '"' + s + '"';
-        }
     }
 
     static String formatStringLiteral(String s)
     {
         s = s.replace("'", "''");
-        if (isAsciiPrintable(s)) {
+        if (CharMatcher.inRange((char) 0x20, (char) 0x7E).matchesAllOf(s)) {
             return "'" + s + "'";
         }
 
@@ -682,7 +708,7 @@ public final class ExpressionFormatter
         PrimitiveIterator.OfInt iterator = s.codePoints().iterator();
         while (iterator.hasNext()) {
             int codePoint = iterator.nextInt();
-            checkArgument(codePoint >= 0, "Invalid UTF-8 encoding in characters: " + s);
+            checkArgument(codePoint >= 0, "Invalid UTF-8 encoding in characters: %s", s);
             if (isAsciiPrintable(codePoint)) {
                 char ch = (char) codePoint;
                 if (ch == '\\') {
@@ -750,16 +776,6 @@ public final class ExpressionFormatter
             resultStrings.add(result);
         }
         return Joiner.on(", ").join(resultStrings.build());
-    }
-
-    private static boolean isAsciiPrintable(String s)
-    {
-        for (int i = 0; i < s.length(); i++) {
-            if (!isAsciiPrintable(s.charAt(i))) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static boolean isAsciiPrintable(int codePoint)

@@ -22,7 +22,6 @@ import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.Type;
 import com.google.common.base.Joiner;
-import com.google.common.base.Throwables;
 import com.google.common.base.Ticker;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
@@ -32,7 +31,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
-import com.google.common.util.concurrent.ExecutionError;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
@@ -116,25 +114,11 @@ public class DatabaseShardManager
 
     private final LoadingCache<String, Integer> nodeIdCache = CacheBuilder.newBuilder()
             .maximumSize(10_000)
-            .build(new CacheLoader<String, Integer>()
-            {
-                @Override
-                public Integer load(String nodeIdentifier)
-                {
-                    return loadNodeId(nodeIdentifier);
-                }
-            });
+            .build(CacheLoader.from(this::loadNodeId));
 
     private final LoadingCache<Long, Map<Integer, String>> bucketAssignmentsCache = CacheBuilder.newBuilder()
             .expireAfterWrite(1, SECONDS)
-            .build(new CacheLoader<Long, Map<Integer, String>>()
-            {
-                @Override
-                public Map<Integer, String> load(Long distributionId)
-                {
-                    return loadBucketAssignments(distributionId);
-                }
-            });
+            .build(CacheLoader.from(this::loadBucketAssignments));
 
     @Inject
     public DatabaseShardManager(
@@ -286,6 +270,14 @@ public class DatabaseShardManager
                 }
                 if (attempts >= MAX_ADD_COLUMN_ATTEMPTS) {
                     throw metadataError(e);
+                }
+                log.warn(e, "Failed to alter table on attempt %s, will retry. SQL: %s", attempts, sql);
+                try {
+                    SECONDS.sleep(3);
+                }
+                catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw metadataError(ie);
                 }
             }
         }
@@ -636,8 +628,9 @@ public class DatabaseShardManager
         try {
             return bucketAssignmentsCache.getUnchecked(distributionId);
         }
-        catch (UncheckedExecutionException | ExecutionError e) {
-            throw Throwables.propagate(e.getCause());
+        catch (UncheckedExecutionException e) {
+            throwIfInstanceOf(e.getCause(), PrestoException.class);
+            throw e;
         }
     }
 
@@ -686,7 +679,7 @@ public class DatabaseShardManager
             return existingShards.build();
         }
         catch (SQLException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 
@@ -701,6 +694,8 @@ public class DatabaseShardManager
         Iterator<String> nodeIterator = cyclingShuffledIterator(nodeIds);
 
         ImmutableMap.Builder<Integer, String> assignments = ImmutableMap.builder();
+        PrestoException limiterException = null;
+        Set<String> offlineNodes = new HashSet<>();
 
         for (BucketNode bucketNode : getBuckets(distributionId)) {
             int bucket = bucketNode.getBucketNumber();
@@ -710,7 +705,18 @@ public class DatabaseShardManager
                 if (nanosSince(startTime).compareTo(startupGracePeriod) < 0) {
                     throw new PrestoException(SERVER_STARTING_UP, "Cannot reassign buckets while server is starting");
                 }
-                assignmentLimiter.checkAssignFrom(nodeId);
+
+                try {
+                    if (offlineNodes.add(nodeId)) {
+                        assignmentLimiter.checkAssignFrom(nodeId);
+                    }
+                }
+                catch (PrestoException e) {
+                    if (limiterException == null) {
+                        limiterException = e;
+                    }
+                    continue;
+                }
 
                 String oldNodeId = nodeId;
                 // TODO: use smarter system to choose replacement node
@@ -720,6 +726,10 @@ public class DatabaseShardManager
             }
 
             assignments.put(bucket, nodeId);
+        }
+
+        if (limiterException != null) {
+            throw limiterException;
         }
 
         return assignments.build();
@@ -741,8 +751,9 @@ public class DatabaseShardManager
         try {
             return nodeIdCache.getUnchecked(nodeIdentifier);
         }
-        catch (UncheckedExecutionException | ExecutionError e) {
-            throw Throwables.propagate(e.getCause());
+        catch (UncheckedExecutionException e) {
+            throwIfInstanceOf(e.getCause(), PrestoException.class);
+            throw e;
         }
     }
 

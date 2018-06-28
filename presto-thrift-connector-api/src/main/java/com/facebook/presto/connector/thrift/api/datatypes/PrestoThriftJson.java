@@ -16,9 +16,9 @@ package com.facebook.presto.connector.thrift.api.datatypes;
 import com.facebook.presto.connector.thrift.api.PrestoThriftBlock;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.swift.codec.ThriftConstructor;
-import com.facebook.swift.codec.ThriftField;
-import com.facebook.swift.codec.ThriftStruct;
+import io.airlift.drift.annotations.ThriftConstructor;
+import io.airlift.drift.annotations.ThriftField;
+import io.airlift.drift.annotations.ThriftStruct;
 
 import javax.annotation.Nullable;
 
@@ -26,14 +26,14 @@ import java.util.Objects;
 
 import static com.facebook.presto.connector.thrift.api.PrestoThriftBlock.jsonData;
 import static com.facebook.presto.connector.thrift.api.datatypes.SliceData.fromSliceBasedBlock;
-import static com.facebook.swift.codec.ThriftField.Requiredness.OPTIONAL;
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.drift.annotations.ThriftField.Requiredness.OPTIONAL;
 
 /**
  * Elements of {@code nulls} array determine if a value for a corresponding row is null.
  * Each elements of {@code sizes} array contains the length in bytes for the corresponding element.
  * If row is null then the corresponding element in {@code sizes} is ignored.
- * {@code bytes} array contains uft8 encoded byte values for string representation of json.
+ * {@code bytes} array contains UTF-8 encoded byte values for string representation of json.
  * Values for all rows are written to {@code bytes} array one after another.
  * The total number of bytes must be equal to the sum of all sizes.
  */

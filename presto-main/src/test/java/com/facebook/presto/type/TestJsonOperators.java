@@ -15,9 +15,8 @@ package com.facebook.presto.type;
 
 import com.facebook.presto.operator.scalar.AbstractTestFunctions;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.spi.StandardErrorCode;
 import com.facebook.presto.spi.type.ArrayType;
-import com.facebook.presto.spi.type.SqlTimestamp;
+import com.facebook.presto.spi.type.RowType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.testing.LocalQueryRunner;
 import com.facebook.presto.testing.MaterializedResult;
@@ -36,14 +35,17 @@ import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
 import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.facebook.presto.spi.type.SmallintType.SMALLINT;
+import static com.facebook.presto.spi.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.spi.type.TinyintType.TINYINT;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
+import static com.facebook.presto.testing.DateTimeTestingUtils.sqlTimestampOf;
 import static com.facebook.presto.type.JsonType.JSON;
 import static com.facebook.presto.util.StructuralTestUtil.mapType;
 import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.POSITIVE_INFINITY;
+import static java.lang.String.format;
+import static org.joda.time.DateTimeZone.UTC;
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
 public class TestJsonOperators
@@ -55,7 +57,6 @@ public class TestJsonOperators
 
     @BeforeClass
     public void setUp()
-            throws Exception
     {
         runner = new LocalQueryRunner(TEST_SESSION);
     }
@@ -69,6 +70,8 @@ public class TestJsonOperators
         }
     }
 
+    // todo add cases for decimal
+
     @Test
     public void testCastToBigint()
     {
@@ -77,7 +80,7 @@ public class TestJsonOperators
         assertInvalidFunction("cast(JSON '12345678901234567890' as BIGINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '128.9' as BIGINT)", BIGINT, 129L);
         assertFunction("cast(JSON '1234567890123456789.0' as BIGINT)", BIGINT, 1234567890123456768L); // loss of precision
-        assertFunction("cast(JSON '12345678901234567890.0' as BIGINT)", BIGINT, 9223372036854775807L); // overflow. unexpected behavior. coherent with rest of Presto.
+        assertInvalidFunction("cast(JSON '12345678901234567890.0' as BIGINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '1e-324' as BIGINT)", BIGINT, 0L);
         assertInvalidFunction("cast(JSON '1e309' as BIGINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON 'true' as BIGINT)", BIGINT, 1L);
@@ -101,7 +104,7 @@ public class TestJsonOperators
         assertFunction("cast(JSON '128' as INTEGER)", INTEGER, 128);
         assertInvalidFunction("cast(JSON '12345678901' as INTEGER)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '128.9' as INTEGER)", INTEGER, 129);
-        assertInvalidFunction("cast(JSON '12345678901.0' as INTEGER)", INVALID_CAST_ARGUMENT); // overflow. unexpected behavior. coherent with rest of Presto.
+        assertInvalidFunction("cast(JSON '12345678901.0' as INTEGER)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '1e-324' as INTEGER)", INTEGER, 0);
         assertInvalidFunction("cast(JSON '1e309' as INTEGER)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON 'true' as INTEGER)", INTEGER, 1);
@@ -125,7 +128,7 @@ public class TestJsonOperators
         assertFunction("cast(JSON '128' as SMALLINT)", SMALLINT, (short) 128);
         assertInvalidFunction("cast(JSON '123456' as SMALLINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '128.9' as SMALLINT)", SMALLINT, (short) 129);
-        assertInvalidFunction("cast(JSON '123456.0' as SMALLINT)", INVALID_CAST_ARGUMENT); // overflow. unexpected behavior. coherent with rest of Presto.
+        assertInvalidFunction("cast(JSON '123456.0' as SMALLINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '1e-324' as SMALLINT)", SMALLINT, (short) 0);
         assertInvalidFunction("cast(JSON '1e309' as SMALLINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON 'true' as SMALLINT)", SMALLINT, (short) 1);
@@ -149,7 +152,7 @@ public class TestJsonOperators
         assertFunction("cast(JSON '12' as TINYINT)", TINYINT, (byte) 12);
         assertInvalidFunction("cast(JSON '1234' as TINYINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '12.9' as TINYINT)", TINYINT, (byte) 13);
-        assertInvalidFunction("cast(JSON '1234.0' as TINYINT)", INVALID_CAST_ARGUMENT); // overflow. unexpected behavior. coherent with rest of Presto.
+        assertInvalidFunction("cast(JSON '1234.0' as TINYINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON '1e-324' as TINYINT)", TINYINT, (byte) 0);
         assertInvalidFunction("cast(JSON '1e309' as TINYINT)", INVALID_CAST_ARGUMENT);
         assertFunction("cast(JSON 'true' as TINYINT)", TINYINT, (byte) 1);
@@ -168,7 +171,6 @@ public class TestJsonOperators
 
     @Test
     public void testTypeConstructor()
-            throws Exception
     {
         assertFunction("JSON '123'", JSON, "123");
         assertFunction("JSON '[4,5,6]'", JSON, "[4,5,6]");
@@ -190,7 +192,6 @@ public class TestJsonOperators
 
     @Test
     public void testCastToDouble()
-            throws Exception
     {
         assertFunction("cast(JSON 'null' as DOUBLE)", DOUBLE, null);
         assertFunction("cast(JSON '128' as DOUBLE)", DOUBLE, 128.0);
@@ -217,10 +218,9 @@ public class TestJsonOperators
 
     @Test
     public void testCastFromDouble()
-            throws Exception
     {
         assertFunction("cast(cast(null as double) as JSON)", JSON, null);
-        assertFunction("cast(3.14 as JSON)", JSON, "3.14");
+        assertFunction("cast(3.14E0 as JSON)", JSON, "3.14");
         assertFunction("cast(nan() as JSON)", JSON, "\"NaN\"");
         assertFunction("cast(infinity() as JSON)", JSON, "\"Infinity\"");
         assertFunction("cast(-infinity() as JSON)", JSON, "\"-Infinity\"");
@@ -228,7 +228,6 @@ public class TestJsonOperators
 
     @Test
     public void testCastFromReal()
-            throws Exception
     {
         assertFunction("cast(cast(null as REAL) as JSON)", JSON, null);
         assertFunction("cast(REAL '3.14' as JSON)", JSON, "3.14");
@@ -239,7 +238,6 @@ public class TestJsonOperators
 
     @Test
     public void testCastToReal()
-            throws Exception
     {
         assertFunction("cast(JSON 'null' as REAL)", REAL, null);
         assertFunction("cast(JSON '-128' as REAL)", REAL, -128.0f);
@@ -267,7 +265,6 @@ public class TestJsonOperators
 
     @Test
     public void testCastToDecimal()
-            throws Exception
     {
         assertFunction("cast(JSON 'null' as DECIMAL(10,3))", createDecimalType(10, 3), null);
         assertFunction("cast(JSON '128' as DECIMAL(10,3))", createDecimalType(10, 3), decimal("128.000"));
@@ -282,7 +279,6 @@ public class TestJsonOperators
 
     @Test
     public void testCastFromDecimal()
-            throws Exception
     {
         assertFunction("cast(cast(null as decimal(5,2)) as JSON)", JSON, null);
         assertFunction("cast(DECIMAL '3.14' as JSON)", JSON, "3.14");
@@ -344,6 +340,45 @@ public class TestJsonOperators
     }
 
     @Test
+    public void testEquals()
+    {
+        assertFunction("json_parse('{ \"a\": \"1.1\" , \"b\": \"2.3\" , \"c\": { \"d\": \"314E-2\" }}') = json_parse('{ \"a\": \"1.1\" , \"b\": \"2.3\" , \"c\" : { \"d\" : \"314E-2\" }}')", BOOLEAN, true);
+        assertFunction("JSON '[1,2,3]' = JSON '[1,2,3]'", BOOLEAN, true);
+        assertFunction("JSON '{\"a\":1, \"b\":2}' = JSON '{\"b\":2, \"a\":1}'", BOOLEAN, true);
+        assertFunction("JSON '{\"a\":1, \"b\":2}' = CAST(MAP(ARRAY['b','a'], ARRAY[2,1]) AS JSON)", BOOLEAN, true);
+        assertFunction("JSON 'null' = JSON 'null'", BOOLEAN, true);
+        assertFunction("JSON 'true' = JSON 'true'", BOOLEAN, true);
+        assertFunction("JSON '{\"x\":\"y\"}' = JSON '{\"x\":\"y\"}'", BOOLEAN, true);
+        assertFunction("JSON '[1,2,3]' = JSON '[2,3,1]'", BOOLEAN, false);
+        assertFunction("JSON '{\"p_1\": 1, \"p_2\":\"v_2\", \"p_3\":null, \"p_4\":true, \"p_5\": {\"p_1\":1}}' = " +
+                "JSON '{\"p_2\":\"v_2\", \"p_4\":true, \"p_1\": 1, \"p_3\":null, \"p_5\": {\"p_1\":1}}'", BOOLEAN, true);
+    }
+
+    @Test
+    public void testNotEquals()
+    {
+        assertFunction("JSON '{ \"a\": 1 , \"b\": 2 , \"c\": { \"d\": 3 }}' != JSON '{ \"a\": 1 , \"b\": 2 , \"c\" : { \"d\" : 4 }}'", BOOLEAN, true);
+        assertFunction("JSON '[1,2,3]' != JSON '[1,2,3]'", BOOLEAN, false);
+        assertFunction("JSON '{\"a\":1, \"b\":2}' != JSON '{\"b\":2, \"a\":1}'", BOOLEAN, false);
+        assertFunction("JSON 'null' != JSON 'null'", BOOLEAN, false);
+        assertFunction("JSON 'true' != JSON 'true'", BOOLEAN, false);
+        assertFunction("JSON '{\"x\":\"y\"}' != JSON '{\"x\":\"y\"}'", BOOLEAN, false);
+        assertFunction("JSON '[1,2,3]' != JSON '[2,3,1]'", BOOLEAN, true);
+        assertFunction("JSON '{\"p_1\": 1, \"p_2\":\"v_2\", \"p_3\":null, \"p_4\":true, \"p_5\": {\"p_1\":1}}' != " +
+                "JSON '{\"p_2\":\"v_2\", \"p_4\":true, \"p_1\": 1, \"p_3\":null, \"p_5\": {\"p_1\":1}}'", BOOLEAN, false);
+    }
+
+    @Test
+    public void testIsDistinctFrom()
+    {
+        assertFunction("JSON 'null' IS DISTINCT FROM JSON 'null'", BOOLEAN, false);
+        assertFunction("JSON '{ \"a\": 1 , \"b\": 2 , \"c\": { \"d\": 3 }}' IS DISTINCT FROM JSON '{ \"a\": 1 , \"b\": 2 , \"c\" : { \"d\" : 4 }}'", BOOLEAN, true);
+        assertFunction("JSON '{ \"a\": 1 , \"b\": 2 , \"c\": { \"d\": 3 }}' IS DISTINCT FROM JSON '{ \"b\": 2 , \"a\": 1 , \"c\": { \"d\": 3 }}'", BOOLEAN, false);
+        assertFunction("JSON '{ \"a\": 1 , \"b\": 2 , \"c\": { \"d\": 3 }}' IS DISTINCT FROM JSON 'null'", BOOLEAN, true);
+        assertFunction("JSON 'null' IS DISTINCT FROM JSON '{ \"a\": 1 , \"b\": 2 , \"c\" : { \"d\" : 4 }}'", BOOLEAN, true);
+    }
+
+    @Test
     public void testCastFromVarchar()
     {
         assertFunction("cast(cast (null as varchar) as JSON)", JSON, null);
@@ -355,7 +390,7 @@ public class TestJsonOperators
     public void testCastFromTimestamp()
     {
         assertFunction("cast(cast (null as timestamp) as JSON)", JSON, null);
-        assertFunction("CAST(from_unixtime(1) AS JSON)", JSON, "\"" + sqlTimestamp(1000).toString() + "\"");
+        assertFunction("CAST(TIMESTAMP '1970-01-01 00:00:01' AS JSON)", JSON, format("\"%s\"", sqlTimestampOf(1970, 1, 1, 0, 0, 1, 0, UTC, UTC_KEY, TEST_SESSION)));
     }
 
     @Test
@@ -363,35 +398,62 @@ public class TestJsonOperators
     {
         // the test is to make sure ExpressionOptimizer works with cast + json_parse
         assertCastWithJsonParse("[[1,1], [2,2]]", "ARRAY<ARRAY<INTEGER>>", new ArrayType(new ArrayType(INTEGER)), ImmutableList.of(ImmutableList.of(1, 1), ImmutableList.of(2, 2)));
-        assertInvalidCastWithJsonParse("[1, \"abc\"]", "ARRAY<INTEGER>", INVALID_CAST_ARGUMENT, "Cannot cast to array(integer)");
-        assertCastWithJsonParse("{\"a\"\n:1,  \"b\":\t2}", "MAP<VARCHAR,INTEGER>", mapType(VARCHAR, INTEGER), ImmutableMap.of("a", 1, "b", 2));
-        assertInvalidCastWithJsonParse("{\"[1, 1]\":[2, 2]}", "MAP<ARRAY<INTEGER>,ARRAY<INTEGER>>", INVALID_CAST_ARGUMENT, "Cannot cast JSON to map(array(integer),array(integer))");
-        assertInvalidCastWithJsonParse("{true: false, false:false}", "MAP<BOOLEAN,BOOLEAN>", INVALID_CAST_ARGUMENT, "Cannot cast to map(boolean,boolean)");
-    }
+        assertInvalidCastWithJsonParse("[1, \"abc\"]", "ARRAY<INTEGER>", "Cannot cast to array(integer). Cannot cast 'abc' to INT\n[1, \"abc\"]");
 
-    private static SqlTimestamp sqlTimestamp(long millisUtc)
-    {
-        return new SqlTimestamp(millisUtc, TEST_SESSION.getTimeZoneKey());
+        // Since we will not reformat the JSON string before parse and cast with the optimization,
+        // these extra whitespaces in JSON string is to make sure the cast will work in such cases.
+        assertCastWithJsonParse("{\"a\"\n:1,  \"b\":\t2}", "MAP<VARCHAR,INTEGER>", mapType(VARCHAR, INTEGER), ImmutableMap.of("a", 1, "b", 2));
+        assertInvalidCastWithJsonParse("{\"[1, 1]\":[2, 2]}", "MAP<ARRAY<INTEGER>,ARRAY<INTEGER>>", "Cannot cast JSON to map(array(integer),array(integer))");
+        assertInvalidCastWithJsonParse("{true: false, false:false}", "MAP<BOOLEAN,BOOLEAN>", "Cannot cast to map(boolean,boolean).\n{true: false, false:false}");
+
+        assertCastWithJsonParse(
+                "{\"a\"  \n  :1,  \"b\":  \t  [2, 3]}",
+                "ROW(a INTEGER, b ARRAY<INTEGER>)",
+                RowType.from(ImmutableList.of(
+                        RowType.field("a", INTEGER),
+                        RowType.field("b", new ArrayType(INTEGER)))),
+                ImmutableList.of(1, ImmutableList.of(2, 3)));
+        assertCastWithJsonParse(
+                "[  1,  [2, 3]  ]",
+                "ROW(INTEGER, ARRAY<INTEGER>)",
+                RowType.anonymous(ImmutableList.of(INTEGER, new ArrayType(INTEGER))),
+                ImmutableList.of(1, ImmutableList.of(2, 3)));
+        assertInvalidCastWithJsonParse(
+                "{\"a\" :1,  \"b\": {} }",
+                "ROW(a INTEGER, b ARRAY<INTEGER>)",
+                "Cannot cast to row(a integer,b array(integer)). Expected a json array, but got {\n{\"a\" :1,  \"b\": {} }");
+        assertInvalidCastWithJsonParse(
+                "[  1,  {}  ]",
+                "ROW(INTEGER, ARRAY<INTEGER>)",
+                "Cannot cast to row(integer,array(integer)). Expected a json array, but got {\n[  1,  {}  ]");
     }
 
     private void assertCastWithJsonParse(String json, String castSqlType, Type expectedType, Object expected)
     {
+        String query = "" +
+                "SELECT CAST(JSON_PARSE(col) AS " + castSqlType + ") " +
+                "FROM (VALUES('" + json + "')) AS t(col)";
+
         // building queries with VALUES to avoid constant folding
-        MaterializedResult result = runner.execute((new StringBuilder()).append("SELECT CAST(JSON_PARSE(col) AS ").append(castSqlType).append(") FROM (VALUES('").append(json).append("')) AS t(col)").toString());
+        MaterializedResult result = runner.execute(query);
         assertEquals(result.getTypes().size(), 1);
         assertEquals(result.getTypes().get(0), expectedType);
         assertEquals(result.getOnlyValue(), expected);
     }
 
-    private void assertInvalidCastWithJsonParse(String json, String castSqlType, StandardErrorCode errorCode, String errorMessage)
+    private void assertInvalidCastWithJsonParse(String json, String castSqlType, String message)
     {
+        String query = "" +
+                "SELECT CAST(JSON_PARSE(col) AS " + castSqlType + ") " +
+                "FROM (VALUES('" + json + "')) AS t(col)";
+
         try {
-            MaterializedResult a = runner.execute((new StringBuilder()).append("SELECT CAST(JSON_PARSE(col) AS ").append(castSqlType).append(") FROM (VALUES('").append(json).append("')) AS t(col)").toString());
-            fail("expect to fail");
+            runner.execute(query);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
         }
         catch (PrestoException e) {
-            assertTrue(e.getMessage().startsWith(errorMessage));
-            assertEquals(e.getErrorCode(), errorCode.toErrorCode());
+            assertEquals(e.getErrorCode(), INVALID_CAST_ARGUMENT.toErrorCode());
+            assertEquals(e.getMessage(), message);
         }
     }
 }

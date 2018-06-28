@@ -22,12 +22,12 @@ import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.RunLengthEncodedBlock;
 import com.facebook.presto.spi.type.Type;
 import com.google.common.collect.ImmutableList;
+import com.google.common.io.CountingOutputStream;
 import io.airlift.slice.OutputStreamSliceOutput;
-import io.airlift.slice.SliceOutput;
+import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -47,6 +47,9 @@ import static java.util.Objects.requireNonNull;
 public class RcFileFileWriter
         implements HiveFileWriter
 {
+    private static final int INSTANCE_SIZE = ClassLayout.parseClass(RcFileFileWriter.class).instanceSize();
+
+    private final CountingOutputStream outputStream;
     private final RcFileWriter rcFileWriter;
     private final Callable<Void> rollbackAction;
     private final int[] fileInputColumnIndexes;
@@ -64,21 +67,22 @@ public class RcFileFileWriter
             Optional<Supplier<RcFileDataSource>> validationInputFactory)
             throws IOException
     {
+        this.outputStream = new CountingOutputStream(outputStream);
         rcFileWriter = new RcFileWriter(
-                outputStream instanceof SliceOutput ? ((SliceOutput) outputStream) : new OutputStreamSliceOutput(outputStream),
+                new OutputStreamSliceOutput(this.outputStream),
                 fileColumnTypes,
                 rcFileEncoding,
                 codecName,
                 new AircompressorCodecFactory(new HadoopCodecFactory(getClass().getClassLoader())),
                 metadata,
                 validationInputFactory.isPresent());
-        this.rollbackAction = rollbackAction;
+        this.rollbackAction = requireNonNull(rollbackAction, "rollbackAction is null");
 
         this.fileInputColumnIndexes = requireNonNull(fileInputColumnIndexes, "outputColumnInputIndexes is null");
 
         ImmutableList.Builder<Block> nullBlocks = ImmutableList.builder();
         for (Type fileColumnType : fileColumnTypes) {
-            BlockBuilder blockBuilder = fileColumnType.createBlockBuilder(new BlockBuilderStatus(), 1, 0);
+            BlockBuilder blockBuilder = fileColumnType.createBlockBuilder(null, 1, 0);
             blockBuilder.appendNull();
             nullBlocks.add(blockBuilder.build());
         }
@@ -87,9 +91,15 @@ public class RcFileFileWriter
     }
 
     @Override
+    public long getWrittenBytes()
+    {
+        return outputStream.getCount();
+    }
+
+    @Override
     public long getSystemMemoryUsage()
     {
-        return rcFileWriter.getRetainedSizeInBytes();
+        return INSTANCE_SIZE + rcFileWriter.getRetainedSizeInBytes();
     }
 
     @Override
@@ -98,11 +108,11 @@ public class RcFileFileWriter
         Block[] blocks = new Block[fileInputColumnIndexes.length];
         for (int i = 0; i < fileInputColumnIndexes.length; i++) {
             int inputColumnIndex = fileInputColumnIndexes[i];
-            if (inputColumnIndex >= 0) {
-                blocks[i] = dataPage.getBlock(inputColumnIndex);
+            if (inputColumnIndex < 0) {
+                blocks[i] = new RunLengthEncodedBlock(nullBlocks.get(i), dataPage.getPositionCount());
             }
             else {
-                blocks[i] = new RunLengthEncodedBlock(nullBlocks.get(i), dataPage.getPositionCount());
+                blocks[i] = dataPage.getBlock(inputColumnIndex);
             }
         }
         Page page = new Page(dataPage.getPositionCount(), blocks);
@@ -124,7 +134,7 @@ public class RcFileFileWriter
             try {
                 rollbackAction.call();
             }
-            catch (Exception e2) {
+            catch (Exception ignored) {
                 // ignore
             }
             throw new PrestoException(HIVE_WRITER_CLOSE_ERROR, "Error committing write to Hive", e);

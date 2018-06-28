@@ -15,7 +15,6 @@ package com.facebook.presto.array;
 
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.IntArrayBlockBuilder;
 import org.openjdk.jol.info.ClassLayout;
 import org.testng.annotations.Test;
@@ -28,7 +27,7 @@ public class TestBlockBigArray
     public void testRetainedSizeWithOverlappingBlocks()
     {
         int entries = 123;
-        BlockBuilder blockBuilder = new IntArrayBlockBuilder(new BlockBuilderStatus(), entries);
+        BlockBuilder blockBuilder = new IntArrayBlockBuilder(null, entries);
         for (int i = 0; i < entries; i++) {
             blockBuilder.writeInt(i);
         }
@@ -44,7 +43,7 @@ public class TestBlockBigArray
         }
 
         ReferenceCountMap referenceCountMap = new ReferenceCountMap();
-        referenceCountMap.incrementReference(block);
+        referenceCountMap.incrementAndGet(block);
         long expectedSize = ClassLayout.parseClass(BlockBigArray.class).instanceSize()
                 + referenceCountMap.sizeOf()
                 + (new ObjectBigArray()).sizeOf()

@@ -21,10 +21,8 @@ import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.google.common.base.Splitter;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.ql.exec.FileSinkOperator.RecordWriter;
 import org.apache.hadoop.hive.serde2.SerDeException;
@@ -35,8 +33,10 @@ import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.SettableStructObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.StructField;
 import org.apache.hadoop.mapred.JobConf;
+import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Properties;
 
@@ -46,6 +46,7 @@ import static com.facebook.presto.hive.HiveType.toHiveTypes;
 import static com.facebook.presto.hive.HiveWriteUtils.createFieldSetter;
 import static com.facebook.presto.hive.HiveWriteUtils.createRecordWriter;
 import static com.facebook.presto.hive.HiveWriteUtils.getRowColumnInspectors;
+import static com.facebook.presto.hive.HiveWriteUtils.initializeSerializer;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -56,6 +57,8 @@ import static org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFacto
 public class RecordFileWriter
         implements HiveFileWriter
 {
+    private static final int INSTANCE_SIZE = ClassLayout.parseClass(RecordFileWriter.class).instanceSize();
+
     private final Path path;
     private final JobConf conf;
     private final int fieldCount;
@@ -67,6 +70,8 @@ public class RecordFileWriter
     private final Object row;
     private final FieldSetter[] setters;
     private final long estimatedWriterSystemMemoryUsage;
+
+    private boolean committed;
 
     public RecordFileWriter(
             Path path,
@@ -114,9 +119,29 @@ public class RecordFileWriter
     }
 
     @Override
+    public long getWrittenBytes()
+    {
+        if (recordWriter instanceof ExtendedRecordWriter) {
+            return ((ExtendedRecordWriter) recordWriter).getWrittenBytes();
+        }
+
+        if (committed) {
+            try {
+                return path.getFileSystem(conf).getFileStatus(path).getLen();
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        // there is no good way to get this when RecordWriter is not yet committed
+        return 0;
+    }
+
+    @Override
     public long getSystemMemoryUsage()
     {
-        return estimatedWriterSystemMemoryUsage;
+        return INSTANCE_SIZE + estimatedWriterSystemMemoryUsage;
     }
 
     @Override
@@ -152,6 +177,7 @@ public class RecordFileWriter
     {
         try {
             recordWriter.close(false);
+            committed = true;
         }
         catch (IOException e) {
             throw new PrestoException(HIVE_WRITER_CLOSE_ERROR, "Error committing write to Hive", e);
@@ -175,24 +201,17 @@ public class RecordFileWriter
         }
     }
 
-    @SuppressWarnings("deprecation")
-    private static Serializer initializeSerializer(Configuration conf, Properties properties, String serializerName)
-    {
-        try {
-            Serializer result = (Serializer) Class.forName(serializerName).getConstructor().newInstance();
-            result.initialize(conf, properties);
-            return result;
-        }
-        catch (SerDeException | ReflectiveOperationException e) {
-            throw Throwables.propagate(e);
-        }
-    }
-
     @Override
     public String toString()
     {
         return toStringHelper(this)
                 .add("path", path)
                 .toString();
+    }
+
+    public interface ExtendedRecordWriter
+            extends RecordWriter
+    {
+        long getWrittenBytes();
     }
 }

@@ -16,6 +16,7 @@ package com.facebook.presto.hive;
 import com.facebook.presto.hive.authentication.NoHdfsAuthentication;
 import com.facebook.presto.hive.metastore.ExtendedHiveMetastore;
 import com.facebook.presto.hive.metastore.file.FileHiveMetastore;
+import org.testng.SkipException;
 
 import java.io.File;
 
@@ -27,7 +28,7 @@ public class TestHiveClientFileMetastore
     {
         File baseDir = new File(tempDir, "metastore");
         HiveClientConfig hiveConfig = new HiveClientConfig();
-        HdfsConfigurationUpdater updator = new HdfsConfigurationUpdater(hiveConfig, new HiveS3Config());
+        HdfsConfigurationUpdater updator = new HdfsConfigurationUpdater(hiveConfig);
         HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(updator);
         HdfsEnvironment hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, hiveConfig, new NoHdfsAuthentication());
         return new FileHiveMetastore(hdfsEnvironment, baseDir.toURI().toString(), "test");
@@ -41,6 +42,13 @@ public class TestHiveClientFileMetastore
 
     @Override
     public void testPartitionSchemaMismatch()
+    {
+        // test expects an exception to be thrown
+        throw new SkipException("FileHiveMetastore only supports replaceTable() for views");
+    }
+
+    @Override
+    public void testBucketedTableEvolution()
     {
         // FileHiveMetastore only supports replaceTable() for views
     }

@@ -19,6 +19,7 @@ import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.block.IntArrayBlock;
 import com.facebook.presto.spi.function.OperatorType;
 import com.facebook.presto.spi.type.ArrayType;
+import com.facebook.presto.spi.type.RowType;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.relational.CallExpression;
@@ -27,6 +28,8 @@ import com.facebook.presto.sql.relational.RowExpression;
 import com.facebook.presto.sql.relational.optimizer.ExpressionOptimizer;
 import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
@@ -36,6 +39,7 @@ import static com.facebook.presto.metadata.Signature.internalOperator;
 import static com.facebook.presto.metadata.Signature.internalScalarFunction;
 import static com.facebook.presto.operator.scalar.JsonStringToArrayCast.JSON_STRING_TO_ARRAY_NAME;
 import static com.facebook.presto.operator.scalar.JsonStringToMapCast.JSON_STRING_TO_MAP_NAME;
+import static com.facebook.presto.operator.scalar.JsonStringToRowCast.JSON_STRING_TO_ROW_NAME;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
@@ -53,11 +57,26 @@ import static org.testng.Assert.assertEquals;
 
 public class TestExpressionOptimizer
 {
+    private TypeRegistry typeManager;
+    private ExpressionOptimizer optimizer;
+
+    @BeforeClass
+    public void setUp()
+    {
+        typeManager = new TypeRegistry();
+        optimizer = new ExpressionOptimizer(new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig()), typeManager, TEST_SESSION);
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void tearDown()
+    {
+        typeManager = null;
+        optimizer = null;
+    }
+
     @Test(timeOut = 10_000)
     public void testPossibleExponentialOptimizationTime()
     {
-        TypeRegistry typeManager = new TypeRegistry();
-        ExpressionOptimizer optimizer = new ExpressionOptimizer(new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig()), typeManager, TEST_SESSION);
         RowExpression expression = constant(1L, BIGINT);
         for (int i = 0; i < 100; i++) {
             Signature signature = internalOperator(OperatorType.ADD.name(), parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.BIGINT), parseTypeSignature(StandardTypes.BIGINT));
@@ -67,25 +86,8 @@ public class TestExpressionOptimizer
     }
 
     @Test
-    public void testTryOptimization()
-    {
-        TypeRegistry typeManager = new TypeRegistry();
-        ExpressionOptimizer optimizer = new ExpressionOptimizer(new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig()), typeManager, TEST_SESSION);
-        Signature signature = new Signature("TRY", SCALAR, BIGINT.getTypeSignature());
-
-        RowExpression tryExpression = new CallExpression(signature, BIGINT, ImmutableList.of(constant(1L, BIGINT)));
-        assertEquals(optimizer.optimize(tryExpression), constant(1L, BIGINT));
-
-        tryExpression = new CallExpression(signature, BIGINT, ImmutableList.of(field(1, BIGINT)));
-        assertEquals(optimizer.optimize(tryExpression), field(1, BIGINT));
-    }
-
-    @Test
     public void testIfConstantOptimization()
     {
-        TypeRegistry typeManager = new TypeRegistry();
-        ExpressionOptimizer optimizer = new ExpressionOptimizer(new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig()), typeManager, TEST_SESSION);
-
         assertEquals(optimizer.optimize(ifExpression(constant(true, BOOLEAN), 1L, 2L)), constant(1L, BIGINT));
         assertEquals(optimizer.optimize(ifExpression(constant(false, BOOLEAN), 1L, 2L)), constant(2L, BIGINT));
         assertEquals(optimizer.optimize(ifExpression(constant(null, BOOLEAN), 1L, 2L)), constant(2L, BIGINT));
@@ -98,8 +100,6 @@ public class TestExpressionOptimizer
     @Test
     public void testCastWithJsonParseOptimization()
     {
-        TypeRegistry typeManager = new TypeRegistry();
-        ExpressionOptimizer optimizer = new ExpressionOptimizer(new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig()), typeManager, TEST_SESSION);
         Signature jsonParseSignature = new Signature("json_parse", SCALAR, JSON.getTypeSignature(), ImmutableList.of(VARCHAR.getTypeSignature()));
 
         // constant
@@ -126,6 +126,14 @@ public class TestExpressionOptimizer
         assertEquals(
                 resultExpression,
                 call(internalScalarFunction(JSON_STRING_TO_MAP_NAME, parseTypeSignature("map(integer,varchar)"), parseTypeSignature(StandardTypes.VARCHAR)), mapType(INTEGER, VARCHAR), field(1, VARCHAR)));
+
+        // varchar to row
+        jsonCastSignature = new Signature(CAST, SCALAR, parseTypeSignature("row(varchar,bigint)"), ImmutableList.of(JSON.getTypeSignature()));
+        jsonCastExpression = new CallExpression(jsonCastSignature, RowType.anonymous(ImmutableList.of(VARCHAR, BIGINT)), ImmutableList.of(call(jsonParseSignature, JSON, field(1, VARCHAR))));
+        resultExpression = optimizer.optimize(jsonCastExpression);
+        assertEquals(
+                resultExpression,
+                call(internalScalarFunction(JSON_STRING_TO_ROW_NAME, parseTypeSignature("row(varchar,bigint)"), parseTypeSignature(StandardTypes.VARCHAR)), RowType.anonymous(ImmutableList.of(VARCHAR, BIGINT)), field(1, VARCHAR)));
     }
 
     private static RowExpression ifExpression(RowExpression condition, long trueValue, long falseValue)

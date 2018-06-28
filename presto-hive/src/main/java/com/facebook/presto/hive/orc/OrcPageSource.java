@@ -15,24 +15,23 @@ package com.facebook.presto.hive.orc;
 
 import com.facebook.presto.hive.FileFormatDataSourceStats;
 import com.facebook.presto.hive.HiveColumnHandle;
+import com.facebook.presto.memory.context.AggregatedMemoryContext;
 import com.facebook.presto.orc.OrcCorruptionException;
 import com.facebook.presto.orc.OrcDataSource;
 import com.facebook.presto.orc.OrcRecordReader;
-import com.facebook.presto.orc.memory.AggregatedMemoryContext;
 import com.facebook.presto.spi.ConnectorPageSource;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.LazyBlock;
 import com.facebook.presto.spi.block.LazyBlockLoader;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 
 import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
@@ -41,6 +40,7 @@ import static com.facebook.presto.hive.HiveErrorCode.HIVE_CURSOR_ERROR;
 import static com.facebook.presto.orc.OrcReader.MAX_BATCH_SIZE;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkState;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class OrcPageSource
@@ -96,7 +96,7 @@ public class OrcPageSource
             hiveColumnIndexes[columnIndex] = column.getHiveColumnIndex();
 
             if (!recordReader.isColumnPresent(column.getHiveColumnIndex())) {
-                BlockBuilder blockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), MAX_BATCH_SIZE, NULL_ENTRY_SIZE);
+                BlockBuilder blockBuilder = type.createBlockBuilder(null, MAX_BATCH_SIZE, NULL_ENTRY_SIZE);
                 for (int i = 0; i < MAX_BATCH_SIZE; i++) {
                     blockBuilder.appendNull();
                 }
@@ -107,12 +107,6 @@ public class OrcPageSource
         columnNames = namesBuilder.build();
 
         this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
-    }
-
-    @Override
-    public long getTotalBytes()
-    {
-        return recordReader.getSplitLength();
     }
 
     @Override
@@ -160,9 +154,13 @@ public class OrcPageSource
             closeWithSuppression(e);
             throw e;
         }
+        catch (OrcCorruptionException e) {
+            closeWithSuppression(e);
+            throw new PrestoException(HIVE_BAD_DATA, e);
+        }
         catch (IOException | RuntimeException e) {
             closeWithSuppression(e);
-            throw new PrestoException(HIVE_CURSOR_ERROR, e);
+            throw new PrestoException(HIVE_CURSOR_ERROR, format("Failed to read ORC file: %s", orcDataSource.getId()), e);
         }
     }
 
@@ -180,7 +178,7 @@ public class OrcPageSource
             recordReader.close();
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -240,11 +238,11 @@ public class OrcPageSource
                 Block block = recordReader.readBlock(type, columnIndex);
                 lazyBlock.setBlock(block);
             }
-            catch (IOException e) {
-                if (e instanceof OrcCorruptionException) {
-                    throw new PrestoException(HIVE_BAD_DATA, e);
-                }
-                throw new PrestoException(HIVE_CURSOR_ERROR, e);
+            catch (OrcCorruptionException e) {
+                throw new PrestoException(HIVE_BAD_DATA, e);
+            }
+            catch (IOException | RuntimeException e) {
+                throw new PrestoException(HIVE_CURSOR_ERROR, format("Failed to read ORC file: %s", orcDataSource.getId()), e);
             }
 
             loaded = true;

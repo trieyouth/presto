@@ -24,9 +24,7 @@ import com.facebook.presto.orc.stream.LongInputStream;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.VariableWidthBlock;
-import com.facebook.presto.spi.type.CharType;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.spi.type.VarcharType;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
@@ -35,18 +33,15 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DATA;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.LENGTH;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;
+import static com.facebook.presto.orc.reader.SliceStreamReader.computeTruncatedLength;
 import static com.facebook.presto.orc.stream.MissingInputStreamSource.missingStreamSource;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
-import static com.facebook.presto.spi.type.Chars.byteCountWithoutTrailingSpace;
-import static com.facebook.presto.spi.type.Chars.isCharType;
-import static com.facebook.presto.spi.type.Varchars.byteCount;
-import static com.facebook.presto.spi.type.Varchars.isVarcharType;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
@@ -124,7 +119,7 @@ public class SliceDirectStreamReader
         }
 
         // create new isNullVector and offsetVector for VariableWidthBlock
-        boolean[] isNullVector = new boolean[nextBatchSize];
+        boolean[] isNullVector = null;
         int[] offsetVector = new int[nextBatchSize + 1];
 
         // lengthVector is reused across calls
@@ -136,22 +131,29 @@ public class SliceDirectStreamReader
             if (lengthStream == null) {
                 throw new OrcCorruptionException(streamDescriptor.getOrcDataSourceId(), "Value is not null but length stream is not present");
             }
-            Arrays.fill(isNullVector, false);
             lengthStream.nextIntVector(nextBatchSize, lengthVector);
         }
         else {
+            isNullVector = new boolean[nextBatchSize];
             int nullValues = presentStream.getUnsetBits(nextBatchSize, isNullVector);
             if (nullValues != nextBatchSize) {
                 if (lengthStream == null) {
                     throw new OrcCorruptionException(streamDescriptor.getOrcDataSourceId(), "Value is not null but length stream is not present");
                 }
-                lengthStream.nextIntVector(nextBatchSize, lengthVector, isNullVector);
+
+                if (nullValues == 0) {
+                    isNullVector = null;
+                    lengthStream.nextIntVector(nextBatchSize, lengthVector);
+                }
+                else {
+                    lengthStream.nextIntVector(nextBatchSize, lengthVector, isNullVector);
+                }
             }
         }
 
         long totalLength = 0;
         for (int i = 0; i < nextBatchSize; i++) {
-            if (!isNullVector[i]) {
+            if (isNullVector == null || !isNullVector[i]) {
                 totalLength += lengthVector[i];
             }
         }
@@ -160,7 +162,7 @@ public class SliceDirectStreamReader
         readOffset = 0;
         nextBatchSize = 0;
         if (totalLength == 0) {
-            return new VariableWidthBlock(currentBatchSize, EMPTY_SLICE, offsetVector, isNullVector);
+            return new VariableWidthBlock(currentBatchSize, EMPTY_SLICE, offsetVector, Optional.ofNullable(isNullVector));
         }
         if (totalLength > ONE_GIGABYTE) {
             throw new PrestoException(GENERIC_INTERNAL_ERROR,
@@ -177,7 +179,7 @@ public class SliceDirectStreamReader
         // truncate string and update offsets
         offsetVector[0] = 0;
         for (int i = 0; i < currentBatchSize; i++) {
-            if (isNullVector[i]) {
+            if (isNullVector != null && isNullVector[i]) {
                 offsetVector[i + 1] = offsetVector[i];
                 continue;
             }
@@ -187,25 +189,14 @@ public class SliceDirectStreamReader
             // read data without truncation
             dataStream.next(data, offset, offset + length);
 
-            // calculate truncated length
-            int truncatedLength = length;
-            if (isVarcharType(type)) {
-                VarcharType varcharType = (VarcharType) type;
-                int codePointCount = varcharType.isUnbounded() ? length : varcharType.getLengthSafe();
-                truncatedLength = byteCount(slice, offset, length, codePointCount);
-            }
-            else if (isCharType(type)) {
-                // truncate the characters and then remove the trailing white spaces
-                truncatedLength = byteCountWithoutTrailingSpace(slice, offset, length, ((CharType) type).getLength());
-            }
-
             // adjust offsets with truncated length
+            int truncatedLength = computeTruncatedLength(slice, offset, length, type);
             verify(truncatedLength >= 0);
             offsetVector[i + 1] = offsetVector[i] + truncatedLength;
         }
 
         // this can lead to over-retention but unlikely to happen given truncation rarely happens
-        return new VariableWidthBlock(currentBatchSize, slice, offsetVector, isNullVector);
+        return new VariableWidthBlock(currentBatchSize, slice, offsetVector, Optional.ofNullable(isNullVector));
     }
 
     private void openRowGroup()
@@ -220,7 +211,6 @@ public class SliceDirectStreamReader
 
     @Override
     public void startStripe(InputStreamSources dictionaryStreamSources, List<ColumnEncoding> encoding)
-            throws IOException
     {
         presentStreamSource = missingStreamSource(BooleanInputStream.class);
         lengthStreamSource = missingStreamSource(LongInputStream.class);
@@ -238,7 +228,6 @@ public class SliceDirectStreamReader
 
     @Override
     public void startRowGroup(InputStreamSources dataStreamSources)
-            throws IOException
     {
         presentStreamSource = dataStreamSources.getInputStreamSource(streamDescriptor, PRESENT, BooleanInputStream.class);
         lengthStreamSource = dataStreamSources.getInputStreamSource(streamDescriptor, LENGTH, LongInputStream.class);

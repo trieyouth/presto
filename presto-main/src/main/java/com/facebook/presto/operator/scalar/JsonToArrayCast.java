@@ -21,7 +21,6 @@ import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.function.OperatorType;
 import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.StandardTypes;
@@ -38,6 +37,8 @@ import io.airlift.slice.Slice;
 import java.lang.invoke.MethodHandle;
 
 import static com.facebook.presto.metadata.Signature.typeVariable;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.util.Failures.checkCondition;
@@ -75,7 +76,11 @@ public class JsonToArrayCast
 
         BlockBuilderAppender elementAppender = BlockBuilderAppender.createBlockBuilderAppender(arrayType.getElementType());
         MethodHandle methodHandle = METHOD_HANDLE.bindTo(arrayType).bindTo(elementAppender);
-        return new ScalarFunctionImplementation(true, ImmutableList.of(false), methodHandle, isDeterministic());
+        return new ScalarFunctionImplementation(
+                true,
+                ImmutableList.of(valueTypeArgumentProperty(RETURN_NULL_ON_NULL)),
+                methodHandle,
+                isDeterministic());
     }
 
     @UsedByGeneratedCode
@@ -90,7 +95,7 @@ public class JsonToArrayCast
             if (jsonParser.getCurrentToken() != START_ARRAY) {
                 throw new JsonCastException(format("Expected a json array, but got %s", jsonParser.getText()));
             }
-            BlockBuilder blockBuilder = arrayType.getElementType().createBlockBuilder(new BlockBuilderStatus(), 20);
+            BlockBuilder blockBuilder = arrayType.getElementType().createBlockBuilder(null, 20);
             while (jsonParser.nextToken() != JsonToken.END_ARRAY) {
                 elementAppender.append(jsonParser, blockBuilder);
             }

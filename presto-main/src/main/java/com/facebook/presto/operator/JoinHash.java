@@ -49,6 +49,12 @@ public final class JoinHash
     }
 
     @Override
+    public boolean isEmpty()
+    {
+        return getJoinPositionCount() == 0;
+    }
+
+    @Override
     public final int getChannelCount()
     {
         return pagesHash.getChannelCount();
@@ -64,6 +70,12 @@ public final class JoinHash
     public long getInMemorySizeInBytes()
     {
         return INSTANCE_SIZE + pagesHash.getInMemorySizeInBytes() + (positionLinks == null ? 0 : positionLinks.getSizeInBytes());
+    }
+
+    @Override
+    public long joinPositionWithinPartition(long joinPosition)
+    {
+        return joinPosition;
     }
 
     @Override

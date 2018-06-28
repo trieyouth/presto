@@ -37,21 +37,19 @@ import org.weakref.jmx.Nested;
 import javax.inject.Inject;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.security.Principal;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.facebook.presto.spi.StandardErrorCode.SERVER_STARTING_UP;
+import static com.facebook.presto.util.PropertiesUtil.loadProperties;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
-import static com.google.common.collect.Maps.fromProperties;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -513,6 +511,22 @@ public class AccessControlManager
     }
 
     @Override
+    public void checkCanCreateViewWithSelectFromColumns(TransactionId transactionId, Identity identity, QualifiedObjectName tableName, Set<String> columnNames)
+    {
+        requireNonNull(identity, "identity is null");
+        requireNonNull(tableName, "tableName is null");
+
+        authenticationCheck(() -> checkCanAccessCatalog(identity, tableName.getCatalogName()));
+
+        authorizationCheck(() -> systemAccessControl.get().checkCanCreateViewWithSelectFromColumns(identity, tableName.asCatalogSchemaTableName(), columnNames));
+
+        CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, tableName.getCatalogName());
+        if (entry != null) {
+            authorizationCheck(() -> entry.getAccessControl().checkCanCreateViewWithSelectFromColumns(entry.getTransactionHandle(transactionId), identity, tableName.asSchemaTableName(), columnNames));
+        }
+    }
+
+    @Override
     public void checkCanGrantTablePrivilege(TransactionId transactionId, Identity identity, Privilege privilege, QualifiedObjectName tableName, String grantee, boolean withGrantOption)
     {
         requireNonNull(identity, "identity is null");
@@ -569,6 +583,23 @@ public class AccessControlManager
         CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, catalogName);
         if (entry != null) {
             authorizationCheck(() -> entry.getAccessControl().checkCanSetCatalogSessionProperty(identity, propertyName));
+        }
+    }
+
+    @Override
+    public void checkCanSelectFromColumns(TransactionId transactionId, Identity identity, QualifiedObjectName tableName, Set<String> columnNames)
+    {
+        requireNonNull(identity, "identity is null");
+        requireNonNull(tableName, "tableName is null");
+        requireNonNull(columnNames, "columnNames is null");
+
+        authenticationCheck(() -> checkCanAccessCatalog(identity, tableName.getCatalogName()));
+
+        authorizationCheck(() -> systemAccessControl.get().checkCanSelectFromColumns(identity, tableName.asCatalogSchemaTableName(), columnNames));
+
+        CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, tableName.getCatalogName());
+        if (entry != null) {
+            authorizationCheck(() -> entry.getAccessControl().checkCanSelectFromColumns(entry.getTransactionHandle(transactionId), identity, tableName.asSchemaTableName(), columnNames));
         }
     }
 
@@ -629,18 +660,6 @@ public class AccessControlManager
             authorizationFail.update(1);
             throw e;
         }
-    }
-
-    private static Map<String, String> loadProperties(File file)
-            throws Exception
-    {
-        requireNonNull(file, "file is null");
-
-        Properties properties = new Properties();
-        try (FileInputStream in = new FileInputStream(file)) {
-            properties.load(in);
-        }
-        return fromProperties(properties);
     }
 
     private class CatalogAccessControlEntry

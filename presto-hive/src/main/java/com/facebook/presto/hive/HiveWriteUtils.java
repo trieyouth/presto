@@ -14,11 +14,13 @@
 package com.facebook.presto.hive;
 
 import com.facebook.presto.hive.HdfsEnvironment.HdfsContext;
+import com.facebook.presto.hive.RecordFileWriter.ExtendedRecordWriter;
 import com.facebook.presto.hive.metastore.Database;
 import com.facebook.presto.hive.metastore.Partition;
 import com.facebook.presto.hive.metastore.SemiTransactionalHiveMetastore;
 import com.facebook.presto.hive.metastore.Storage;
 import com.facebook.presto.hive.metastore.Table;
+import com.facebook.presto.hive.s3.PrestoS3FileSystem;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SchemaNotFoundException;
 import com.facebook.presto.spi.SchemaTableName;
@@ -39,11 +41,12 @@ import com.facebook.presto.spi.type.TinyintType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.VarbinaryType;
 import com.facebook.presto.spi.type.VarcharType;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Shorts;
 import com.google.common.primitives.SignedBytes;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
@@ -52,6 +55,8 @@ import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.ProtectMode;
 import org.apache.hadoop.hive.ql.exec.FileSinkOperator.RecordWriter;
 import org.apache.hadoop.hive.ql.io.HiveOutputFormat;
+import org.apache.hadoop.hive.ql.io.RCFile;
+import org.apache.hadoop.hive.ql.io.RCFileOutputFormat;
 import org.apache.hadoop.hive.serde2.SerDeException;
 import org.apache.hadoop.hive.serde2.Serializer;
 import org.apache.hadoop.hive.serde2.io.DateWritable;
@@ -77,8 +82,12 @@ import org.apache.hadoop.io.FloatWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.hadoop.io.compress.DefaultCodec;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.Reporter;
+import org.apache.hive.common.util.ReflectionUtil;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
@@ -96,6 +105,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_DATABASE_LOCATION_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_FILESYSTEM_ERROR;
+import static com.facebook.presto.hive.HiveErrorCode.HIVE_SERDE_NOT_FOUND;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITER_DATA_ERROR;
 import static com.facebook.presto.hive.HiveUtil.checkCondition;
 import static com.facebook.presto.hive.HiveUtil.isArrayType;
@@ -114,6 +124,7 @@ import static java.util.UUID.randomUUID;
 import static java.util.stream.Collectors.toList;
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.COMPRESSRESULT;
 import static org.apache.hadoop.hive.metastore.TableType.MANAGED_TABLE;
+import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_TABLE_COLUMNS;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.getPrimitiveJavaObjectInspector;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.getPrimitiveWritableObjectInspector;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.javaBooleanObjectInspector;
@@ -140,6 +151,7 @@ import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveO
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.writableTimestampObjectInspector;
 import static org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory.getCharTypeInfo;
 import static org.apache.hadoop.hive.serde2.typeinfo.TypeInfoFactory.getVarcharTypeInfo;
+import static org.apache.hadoop.mapred.FileOutputFormat.getOutputCompressorClass;
 import static org.joda.time.DateTimeZone.UTC;
 
 public final class HiveWriteUtils
@@ -155,12 +167,57 @@ public final class HiveWriteUtils
     {
         try {
             boolean compress = HiveConf.getBoolVar(conf, COMPRESSRESULT);
+            if (outputFormatName.equals(RCFileOutputFormat.class.getName())) {
+                return createRcFileWriter(target, conf, properties, compress);
+            }
             Object writer = Class.forName(outputFormatName).getConstructor().newInstance();
             return ((HiveOutputFormat<?, ?>) writer).getHiveRecordWriter(conf, target, Text.class, compress, properties, Reporter.NULL);
         }
         catch (IOException | ReflectiveOperationException e) {
             throw new PrestoException(HIVE_WRITER_DATA_ERROR, e);
         }
+    }
+
+    private static RecordWriter createRcFileWriter(Path target, JobConf conf, Properties properties, boolean compress)
+            throws IOException
+    {
+        int columns = properties.getProperty(META_TABLE_COLUMNS).split(",").length;
+        RCFileOutputFormat.setColumnNumber(conf, columns);
+
+        CompressionCodec codec = null;
+        if (compress) {
+            codec = ReflectionUtil.newInstance(getOutputCompressorClass(conf, DefaultCodec.class), conf);
+        }
+
+        RCFile.Writer writer = new RCFile.Writer(target.getFileSystem(conf), conf, target, () -> {}, codec);
+        return new ExtendedRecordWriter()
+        {
+            private long length;
+
+            @Override
+            public long getWrittenBytes()
+            {
+                return length;
+            }
+
+            @Override
+            public void write(Writable value)
+                    throws IOException
+            {
+                writer.append(value);
+                length = writer.getLength();
+            }
+
+            @Override
+            public void close(boolean abort)
+                    throws IOException
+            {
+                writer.close();
+                if (!abort) {
+                    length = target.getFileSystem(conf).getFileStatus(target).getLen();
+                }
+            }
+        };
     }
 
     @SuppressWarnings("deprecation")
@@ -171,8 +228,11 @@ public final class HiveWriteUtils
             result.initialize(conf, properties);
             return result;
         }
+        catch (ClassNotFoundException e) {
+            throw new PrestoException(HIVE_SERDE_NOT_FOUND, "Serializer does not exist: " + serializerName);
+        }
         catch (SerDeException | ReflectiveOperationException e) {
-            throw Throwables.propagate(e);
+            throw new PrestoException(HIVE_WRITER_DATA_ERROR, e);
         }
     }
 
@@ -229,7 +289,7 @@ public final class HiveWriteUtils
         else if (isRowType(type)) {
             return ObjectInspectorFactory.getStandardStructObjectInspector(
                     type.getTypeSignature().getParameters().stream()
-                            .map(parameter -> parameter.getNamedTypeSignature().getName())
+                            .map(parameter -> parameter.getNamedTypeSignature().getName().get())
                             .collect(toList()),
                     type.getTypeParameters().stream()
                             .map(HiveWriteUtils::getJavaObjectInspector)
@@ -374,11 +434,6 @@ public final class HiveWriteUtils
             throw new HiveReadOnlyException(tableName, partitionName);
         }
 
-        // verify sorting
-        if (storage.isSorted()) {
-            throw new PrestoException(NOT_SUPPORTED, format("Inserting into bucketed sorted tables is not supported. %s", tablePartitionDescription));
-        }
-
         // verify skew info
         if (storage.isSkewed()) {
             throw new PrestoException(NOT_SUPPORTED, format("Inserting into bucketed tables with skew is not supported. %s", tablePartitionDescription));
@@ -423,7 +478,7 @@ public final class HiveWriteUtils
     public static boolean isS3FileSystem(HdfsContext context, HdfsEnvironment hdfsEnvironment, Path path)
     {
         try {
-            return hdfsEnvironment.getFileSystem(context, path) instanceof PrestoS3FileSystem;
+            return getRawFileSystem(hdfsEnvironment.getFileSystem(context, path)) instanceof PrestoS3FileSystem;
         }
         catch (IOException e) {
             throw new PrestoException(HIVE_FILESYSTEM_ERROR, "Failed checking path: " + path, e);
@@ -434,12 +489,20 @@ public final class HiveWriteUtils
     {
         try {
             // Hadoop 1.x does not have the ViewFileSystem class
-            return hdfsEnvironment.getFileSystem(context, path)
+            return getRawFileSystem(hdfsEnvironment.getFileSystem(context, path))
                     .getClass().getName().equals("org.apache.hadoop.fs.viewfs.ViewFileSystem");
         }
         catch (IOException e) {
             throw new PrestoException(HIVE_FILESYSTEM_ERROR, "Failed checking path: " + path, e);
         }
+    }
+
+    private static FileSystem getRawFileSystem(FileSystem fileSystem)
+    {
+        if (fileSystem instanceof FilterFileSystem) {
+            return getRawFileSystem(((FilterFileSystem) fileSystem).getRawFileSystem());
+        }
+        return fileSystem;
     }
 
     private static boolean isDirectory(HdfsContext context, HdfsEnvironment hdfsEnvironment, Path path)

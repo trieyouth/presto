@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.facebook.presto</groupId>
         <artifactId>presto-root</artifactId>
-        <version>0.185-SNAPSHOT</version>
+        <version>0.206-SNAPSHOT</version>
     </parent>
 
     <artifactId>presto-jdbc</artifactId>
@@ -20,12 +20,6 @@
         <dependency>
             <groupId>com.facebook.presto</groupId>
             <artifactId>presto-client</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>javax.validation</groupId>
-                    <artifactId>validation-api</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <dependency>
@@ -36,6 +30,11 @@
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>security</artifactId>
         </dependency>
 
         <dependency>
@@ -51,10 +50,6 @@
                     <groupId>com.google.inject</groupId>
                     <artifactId>guice</artifactId>
                 </exclusion>
-                <exclusion>
-                    <groupId>com.google.inject.extensions</groupId>
-                    <artifactId>guice-multibindings</artifactId>
-                </exclusion>
             </exclusions>
         </dependency>
 
@@ -66,6 +61,12 @@
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- for testing -->
@@ -77,7 +78,19 @@
 
         <dependency>
             <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-parser</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
             <artifactId>presto-tpch</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-hive-hadoop2</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -90,6 +103,12 @@
         <dependency>
             <groupId>org.testng</groupId>
             <artifactId>testng</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -114,6 +133,12 @@
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>mockwebserver</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -186,19 +211,6 @@
                                         <exclude>META-INF/maven/**</exclude>
                                         <exclude>META-INF/services/com.fasterxml.**</exclude>
                                         <exclude>LICENSE</exclude>
-                                    </excludes>
-                                </filter>
-                                <filter>
-                                    <artifact>com.google.code.findbugs:annotations</artifact>
-                                    <excludes>
-                                        <exclude>**</exclude>
-                                    </excludes>
-                                </filter>
-                                <!-- TODO: fix in okhttp: https://github.com/square/okhttp/pull/3421 -->
-                                <filter>
-                                    <artifact>com.squareup.okhttp3:okhttp</artifact>
-                                    <excludes>
-                                        <exclude>publicsuffixes.gz</exclude>
                                     </excludes>
                                 </filter>
                             </filters>

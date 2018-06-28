@@ -23,14 +23,16 @@ import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.facebook.presto.sql.gen.lambda.BinaryFunctionInterface;
 import com.facebook.presto.sql.gen.lambda.UnaryFunctionInterface;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Primitives;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Optional;
 
 import static com.facebook.presto.metadata.Signature.typeVariable;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.functionTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.USE_BOXED_TYPE;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.spi.type.TypeUtils.readNativeValue;
 import static com.facebook.presto.util.Reflection.methodHandle;
@@ -81,9 +83,11 @@ public final class ArrayReduceFunction
         MethodHandle methodHandle = METHOD_HANDLE.bindTo(inputType);
         return new ScalarFunctionImplementation(
                 true,
-                ImmutableList.of(false, true, false, false),
-                ImmutableList.of(false, false, false, false),
-                ImmutableList.of(Optional.empty(), Optional.empty(), Optional.of(BinaryFunctionInterface.class), Optional.of(UnaryFunctionInterface.class)),
+                ImmutableList.of(
+                        valueTypeArgumentProperty(RETURN_NULL_ON_NULL),
+                        valueTypeArgumentProperty(USE_BOXED_TYPE),
+                        functionTypeArgumentProperty(BinaryFunctionInterface.class),
+                        functionTypeArgumentProperty(UnaryFunctionInterface.class)),
                 methodHandle.asType(
                         methodHandle.type()
                                 .changeParameterType(1, Primitives.wrap(intermediateType.getJavaType()))
@@ -102,18 +106,8 @@ public final class ArrayReduceFunction
         Object intermediateValue = initialIntermediateValue;
         for (int position = 0; position < positionCount; position++) {
             Object input = readNativeValue(inputType, block, position);
-            try {
-                intermediateValue = inputFunction.apply(intermediateValue, input);
-            }
-            catch (Throwable throwable) {
-                throw Throwables.propagate(throwable);
-            }
+            intermediateValue = inputFunction.apply(intermediateValue, input);
         }
-        try {
-            return outputFunction.apply(intermediateValue);
-        }
-        catch (Throwable throwable) {
-            throw Throwables.propagate(throwable);
-        }
+        return outputFunction.apply(intermediateValue);
     }
 }

@@ -18,7 +18,6 @@ import com.facebook.presto.metadata.FunctionRegistry;
 import com.facebook.presto.metadata.SqlOperator;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
@@ -27,6 +26,8 @@ import com.google.common.collect.ImmutableList;
 import java.lang.invoke.MethodHandle;
 
 import static com.facebook.presto.metadata.Signature.comparableWithVariadicBound;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.function.OperatorType.EQUAL;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.util.Reflection.methodHandle;
@@ -50,14 +51,20 @@ public class RowEqualOperator
     public ScalarFunctionImplementation specialize(BoundVariables boundVariables, int arity, TypeManager typeManager, FunctionRegistry functionRegistry)
     {
         Type type = boundVariables.getTypeVariable("T");
-        return new ScalarFunctionImplementation(false, ImmutableList.of(false, false), METHOD_HANDLE.bindTo(type), isDeterministic());
+        return new ScalarFunctionImplementation(
+                false,
+                ImmutableList.of(
+                        valueTypeArgumentProperty(RETURN_NULL_ON_NULL),
+                        valueTypeArgumentProperty(RETURN_NULL_ON_NULL)),
+                METHOD_HANDLE.bindTo(type),
+                isDeterministic());
     }
 
     public static boolean equals(Type rowType, Block leftRow, Block rightRow)
     {
         // TODO: Fix this. It feels very inefficient and unnecessary to wrap and unwrap with Block
-        BlockBuilder leftBlockBuilder = rowType.createBlockBuilder(new BlockBuilderStatus(), 1);
-        BlockBuilder rightBlockBuilder = rowType.createBlockBuilder(new BlockBuilderStatus(), 1);
+        BlockBuilder leftBlockBuilder = rowType.createBlockBuilder(null, 1);
+        BlockBuilder rightBlockBuilder = rowType.createBlockBuilder(null, 1);
         rowType.writeObject(leftBlockBuilder, leftRow);
         rowType.writeObject(rightBlockBuilder, rightRow);
         return rowType.equalTo(leftBlockBuilder.build(), 0, rightBlockBuilder.build(), 0);

@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.connector.thrift;
 
-import com.facebook.presto.connector.thrift.api.PrestoThriftDomain;
 import com.facebook.presto.connector.thrift.api.PrestoThriftHostAddress;
 import com.facebook.presto.connector.thrift.api.PrestoThriftId;
 import com.facebook.presto.connector.thrift.api.PrestoThriftNullableColumnSet;
@@ -23,24 +22,23 @@ import com.facebook.presto.connector.thrift.api.PrestoThriftService;
 import com.facebook.presto.connector.thrift.api.PrestoThriftSplit;
 import com.facebook.presto.connector.thrift.api.PrestoThriftSplitBatch;
 import com.facebook.presto.connector.thrift.api.PrestoThriftTupleDomain;
-import com.facebook.presto.connector.thrift.clientproviders.PrestoThriftServiceProvider;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.ConnectorSplitSource;
 import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.HostAddress;
+import com.facebook.presto.spi.connector.ConnectorPartitionHandle;
 import com.facebook.presto.spi.connector.ConnectorSplitManager;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
-import com.facebook.presto.spi.predicate.TupleDomain;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import io.airlift.drift.client.DriftClient;
 
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.inject.Inject;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -48,10 +46,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static com.facebook.presto.connector.thrift.api.PrestoThriftDomain.fromDomain;
+import static com.facebook.presto.connector.thrift.util.ThriftExceptions.catchingThriftException;
+import static com.facebook.presto.connector.thrift.util.TupleDomainConversion.tupleDomainToThriftTupleDomain;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.concurrent.MoreFutures.toCompletableFuture;
 import static java.util.Objects.requireNonNull;
@@ -59,20 +57,22 @@ import static java.util.Objects.requireNonNull;
 public class ThriftSplitManager
         implements ConnectorSplitManager
 {
-    private final PrestoThriftServiceProvider clientProvider;
+    private final DriftClient<PrestoThriftService> client;
+    private final ThriftHeaderProvider thriftHeaderProvider;
 
     @Inject
-    public ThriftSplitManager(PrestoThriftServiceProvider clientProvider)
+    public ThriftSplitManager(DriftClient<PrestoThriftService> client, ThriftHeaderProvider thriftHeaderProvider)
     {
-        this.clientProvider = requireNonNull(clientProvider, "clientProvider is null");
+        this.client = requireNonNull(client, "client is null");
+        this.thriftHeaderProvider = requireNonNull(thriftHeaderProvider, "thriftHeaderProvider is null");
     }
 
     @Override
-    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorTableLayoutHandle layout)
+    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorTableLayoutHandle layout, SplitSchedulingStrategy splitSchedulingStrategy)
     {
         ThriftTableLayoutHandle layoutHandle = (ThriftTableLayoutHandle) layout;
         return new ThriftSplitSource(
-                clientProvider.anyHostClient(),
+                client.get(thriftHeaderProvider.getHeaders(session)),
                 new PrestoThriftSchemaTableName(layoutHandle.getSchemaName(), layoutHandle.getTableName()),
                 layoutHandle.getColumns().map(ThriftSplitManager::columnNames),
                 tupleDomainToThriftTupleDomain(layoutHandle.getConstraint()));
@@ -84,19 +84,6 @@ public class ThriftSplitManager
                 .map(ThriftColumnHandle.class::cast)
                 .map(ThriftColumnHandle::getColumnName)
                 .collect(toImmutableSet());
-    }
-
-    private static PrestoThriftTupleDomain tupleDomainToThriftTupleDomain(TupleDomain<ColumnHandle> tupleDomain)
-    {
-        if (!tupleDomain.getDomains().isPresent()) {
-            return new PrestoThriftTupleDomain(null);
-        }
-        Map<String, PrestoThriftDomain> thriftDomains = tupleDomain.getDomains().get()
-                .entrySet().stream()
-                .collect(toImmutableMap(
-                        entry -> ((ThriftColumnHandle) entry.getKey()).getColumnName(),
-                        entry -> fromDomain(entry.getValue())));
-        return new PrestoThriftTupleDomain(thriftDomains);
     }
 
     @NotThreadSafe
@@ -135,7 +122,7 @@ public class ThriftSplitManager
          * It can be called by multiple threads, but only if the previous call finished.
          */
         @Override
-        public CompletableFuture<List<ConnectorSplit>> getNextBatch(int maxSize)
+        public CompletableFuture<ConnectorSplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, int maxSize)
         {
             checkState(future.get() == null || future.get().isDone(), "previous batch not completed");
             checkState(hasMoreData.get(), "this method cannot be invoked when there's no more data");
@@ -146,7 +133,7 @@ public class ThriftSplitManager
                     constraint,
                     maxSize,
                     new PrestoThriftNullableToken(currentToken));
-            ListenableFuture<List<ConnectorSplit>> resultFuture = Futures.transform(
+            ListenableFuture<ConnectorSplitBatch> resultFuture = Futures.transform(
                     splitsFuture,
                     batch -> {
                         requireNonNull(batch, "batch is null");
@@ -155,8 +142,9 @@ public class ThriftSplitManager
                                 .collect(toImmutableList());
                         checkState(nextToken.compareAndSet(currentToken, batch.getNextToken()));
                         checkState(hasMoreData.compareAndSet(true, nextToken.get() != null));
-                        return splits;
+                        return new ConnectorSplitBatch(splits, isFinished());
                     });
+            resultFuture = catchingThriftException(resultFuture);
             future.set(resultFuture);
             return toCompletableFuture(resultFuture);
         }
@@ -174,7 +162,6 @@ public class ThriftSplitManager
             if (currentFuture != null) {
                 currentFuture.cancel(true);
             }
-            client.close();
         }
 
         private static ThriftConnectorSplit toConnectorSplit(PrestoThriftSplit thriftSplit)

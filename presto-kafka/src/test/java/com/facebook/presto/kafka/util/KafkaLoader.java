@@ -15,7 +15,8 @@ package com.facebook.presto.kafka.util;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.client.Column;
-import com.facebook.presto.client.QueryResults;
+import com.facebook.presto.client.QueryData;
+import com.facebook.presto.client.QueryStatusInfo;
 import com.facebook.presto.server.testing.TestingPrestoServer;
 import com.facebook.presto.spi.type.TimeZoneKey;
 import com.facebook.presto.spi.type.Type;
@@ -44,7 +45,7 @@ import static com.facebook.presto.spi.type.TimeType.TIME;
 import static com.facebook.presto.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
 import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
-import static com.facebook.presto.util.DateTimeUtils.parseTime;
+import static com.facebook.presto.util.DateTimeUtils.parseTimeLiteral;
 import static com.facebook.presto.util.DateTimeUtils.parseTimestampWithTimeZone;
 import static com.facebook.presto.util.DateTimeUtils.parseTimestampWithoutTimeZone;
 import static com.google.common.base.Preconditions.checkState;
@@ -90,16 +91,16 @@ public class KafkaLoader
         }
 
         @Override
-        public void addResults(QueryResults results)
+        public void addResults(QueryStatusInfo statusInfo, QueryData data)
         {
-            if (types.get() == null && results.getColumns() != null) {
-                types.set(getTypes(results.getColumns()));
+            if (types.get() == null && statusInfo.getColumns() != null) {
+                types.set(getTypes(statusInfo.getColumns()));
             }
 
-            if (results.getData() != null) {
+            if (data.getData() != null) {
                 checkState(types.get() != null, "Data without types received!");
-                List<Column> columns = results.getColumns();
-                for (List<Object> fields : results.getData()) {
+                List<Column> columns = statusInfo.getColumns();
+                for (List<Object> fields : data.getData()) {
                     ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
                     for (int i = 0; i < fields.size(); i++) {
                         Type type = types.get().get(i);
@@ -142,7 +143,7 @@ public class KafkaLoader
                 return value;
             }
             if (TIME.equals(type)) {
-                return ISO8601_FORMATTER.print(parseTime(timeZoneKey, (String) value));
+                return ISO8601_FORMATTER.print(parseTimeLiteral(timeZoneKey, (String) value));
             }
             if (TIMESTAMP.equals(type)) {
                 return ISO8601_FORMATTER.print(parseTimestampWithoutTimeZone(timeZoneKey, (String) value));

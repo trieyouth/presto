@@ -13,11 +13,10 @@
  */
 package com.facebook.presto.cli;
 
+import com.facebook.presto.cli.ClientOptions.ClientResourceEstimate;
 import com.facebook.presto.cli.ClientOptions.ClientSessionProperty;
 import com.facebook.presto.client.ClientSession;
-import com.facebook.presto.sql.parser.SqlParser;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
 
 import java.util.Optional;
@@ -89,6 +88,17 @@ public class TestClientOptions
     }
 
     @Test
+    public void testResourceEstimates()
+    {
+        Console console = singleCommand(Console.class).parse("--resource-estimate", "resource1=1B", "--resource-estimate", "resource2=2.2h");
+
+        ClientOptions options = console.clientOptions;
+        assertEquals(options.resourceEstimates, ImmutableList.of(
+                new ClientResourceEstimate("resource1", "1B"),
+                new ClientResourceEstimate("resource2", "2.2h")));
+    }
+
+    @Test
     public void testSessionProperties()
     {
         Console console = singleCommand(Console.class).parse("--session", "system=system-value", "--session", "catalog.name=catalog-property");
@@ -133,37 +143,5 @@ public class TestClientOptions
     public void testEqualSignNoAllowedInPropertyCatalog()
     {
         new ClientSessionProperty(Optional.of("cat=alog"), "name", "value");
-    }
-
-    @Test
-    public void testUpdateSessionParameters()
-            throws Exception
-    {
-        ClientOptions options = new ClientOptions();
-        ClientSession session = options.toClientSession();
-        SqlParser sqlParser = new SqlParser();
-
-        ImmutableMap<String, String> existingProperties = ImmutableMap.of("query_max_memory", "10GB", "distributed_join", "true");
-        ImmutableMap<String, String> preparedStatements = ImmutableMap.of("my_query", "select * from foo");
-        session = Console.processSessionParameterChange(sqlParser.createStatement("USE test_catalog.test_schema"), session, existingProperties, preparedStatements);
-        assertEquals(session.getCatalog(), "test_catalog");
-        assertEquals(session.getSchema(), "test_schema");
-        assertEquals(session.getProperties().get("query_max_memory"), "10GB");
-        assertEquals(session.getProperties().get("distributed_join"), "true");
-        assertEquals(session.getPreparedStatements().get("my_query"), "select * from foo");
-
-        session = Console.processSessionParameterChange(sqlParser.createStatement("USE test_schema_b"), session, existingProperties, preparedStatements);
-        assertEquals(session.getCatalog(), "test_catalog");
-        assertEquals(session.getSchema(), "test_schema_b");
-        assertEquals(session.getProperties().get("query_max_memory"), "10GB");
-        assertEquals(session.getProperties().get("distributed_join"), "true");
-        assertEquals(session.getPreparedStatements().get("my_query"), "select * from foo");
-
-        session = Console.processSessionParameterChange(sqlParser.createStatement("USE test_catalog_2.test_schema"), session, existingProperties, preparedStatements);
-        assertEquals(session.getCatalog(), "test_catalog_2");
-        assertEquals(session.getSchema(), "test_schema");
-        assertEquals(session.getProperties().get("query_max_memory"), "10GB");
-        assertEquals(session.getProperties().get("distributed_join"), "true");
-        assertEquals(session.getPreparedStatements().get("my_query"), "select * from foo");
     }
 }

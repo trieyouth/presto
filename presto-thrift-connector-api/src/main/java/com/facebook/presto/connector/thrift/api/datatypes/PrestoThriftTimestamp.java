@@ -14,24 +14,27 @@
 package com.facebook.presto.connector.thrift.api.datatypes;
 
 import com.facebook.presto.connector.thrift.api.PrestoThriftBlock;
+import com.facebook.presto.spi.RecordSet;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.LongArrayBlock;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.swift.codec.ThriftConstructor;
-import com.facebook.swift.codec.ThriftField;
-import com.facebook.swift.codec.ThriftStruct;
+import io.airlift.drift.annotations.ThriftConstructor;
+import io.airlift.drift.annotations.ThriftField;
+import io.airlift.drift.annotations.ThriftStruct;
 
 import javax.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Optional;
 
 import static com.facebook.presto.connector.thrift.api.PrestoThriftBlock.timestampData;
 import static com.facebook.presto.connector.thrift.api.datatypes.PrestoThriftTypeUtils.fromLongBasedBlock;
+import static com.facebook.presto.connector.thrift.api.datatypes.PrestoThriftTypeUtils.fromLongBasedColumn;
 import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
-import static com.facebook.swift.codec.ThriftField.Requiredness.OPTIONAL;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.drift.annotations.ThriftField.Requiredness.OPTIONAL;
 
 /**
  * Elements of {@code nulls} array determine if a value for a corresponding row is null.
@@ -77,7 +80,7 @@ public final class PrestoThriftTimestamp
         int numberOfRecords = numberOfRecords();
         return new LongArrayBlock(
                 numberOfRecords,
-                nulls == null ? new boolean[numberOfRecords] : nulls,
+                Optional.ofNullable(nulls),
                 timestamps == null ? new long[numberOfRecords] : timestamps);
     }
 
@@ -124,6 +127,11 @@ public final class PrestoThriftTimestamp
     public static PrestoThriftBlock fromBlock(Block block)
     {
         return fromLongBasedBlock(block, TIMESTAMP, (nulls, longs) -> timestampData(new PrestoThriftTimestamp(nulls, longs)));
+    }
+
+    public static PrestoThriftBlock fromRecordSetColumn(RecordSet recordSet, int columnIndex, int totalRecords)
+    {
+        return fromLongBasedColumn(recordSet, columnIndex, totalRecords, (nulls, longs) -> timestampData(new PrestoThriftTimestamp(nulls, longs)));
     }
 
     private static boolean sameSizeIfPresent(boolean[] nulls, long[] timestamps)

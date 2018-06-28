@@ -22,13 +22,12 @@ import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.facebook.presto.sql.gen.lambda.LambdaFunctionInterface;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Optional;
 
 import static com.facebook.presto.metadata.Signature.typeVariable;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.functionTypeArgumentProperty;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.util.Reflection.methodHandle;
 import static com.google.common.primitives.Primitives.wrap;
@@ -79,9 +78,7 @@ public final class InvokeFunction
         Type returnType = boundVariables.getTypeVariable("T");
         return new ScalarFunctionImplementation(
                 true,
-                ImmutableList.of(false),
-                ImmutableList.of(false),
-                ImmutableList.of(Optional.of(InvokeLambda.class)),
+                ImmutableList.of(functionTypeArgumentProperty(InvokeLambda.class)),
                 METHOD_HANDLE.asType(
                         METHOD_HANDLE.type()
                                 .changeReturnType(wrap(returnType.getJavaType()))),
@@ -90,12 +87,7 @@ public final class InvokeFunction
 
     public static Object invoke(InvokeLambda function)
     {
-        try {
-            return function.apply();
-        }
-        catch (Throwable throwable) {
-            throw Throwables.propagate(throwable);
-        }
+        return function.apply();
     }
 
     @FunctionalInterface

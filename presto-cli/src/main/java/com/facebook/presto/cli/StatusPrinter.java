@@ -13,7 +13,7 @@
  */
 package com.facebook.presto.cli;
 
-import com.facebook.presto.client.QueryResults;
+import com.facebook.presto.client.QueryStatusInfo;
 import com.facebook.presto.client.StageStats;
 import com.facebook.presto.client.StatementClient;
 import com.facebook.presto.client.StatementStats;
@@ -57,12 +57,12 @@ public class StatusPrinter
 
     private boolean debug;
 
-    public StatusPrinter(StatementClient client, PrintStream out)
+    public StatusPrinter(StatementClient client, PrintStream out, boolean debug)
     {
         this.client = client;
         this.out = out;
         this.console = new ConsolePrinter(out);
-        this.debug = client.isDebug();
+        this.debug = debug;
     }
 
 /*
@@ -73,6 +73,7 @@ Splits:   646 queued, 34 running, 175 done
 CPU Time: 33.7s total,  191K rows/s, 16.6MB/s, 22% active
 Per Node: 2.5 parallelism,  473K rows/s, 41.1MB/s
 Parallelism: 2.5
+Peak Memory: 1.97GB
 0:13 [6.45M rows,  560MB] [ 473K rows/s, 41.1MB/s] [=========>>           ] 20%
 
      STAGES   ROWS  ROWS/s  BYTES  BYTES/s   PEND    RUN   DONE
@@ -86,10 +87,10 @@ Parallelism: 2.5
     {
         long lastPrint = System.nanoTime();
         try {
-            while (client.isValid()) {
+            while (client.isRunning()) {
                 try {
                     // exit status loop if there is pending output
-                    if (client.current().getData() != null) {
+                    if (client.currentData().getData() != null) {
                         return;
                     }
 
@@ -137,14 +138,14 @@ Parallelism: 2.5
     private void updateScreen()
     {
         console.repositionCursor();
-        printQueryInfo(client.current());
+        printQueryInfo(client.currentStatusInfo());
     }
 
     public void printFinalInfo()
     {
         Duration wallTime = nanosSince(start);
 
-        QueryResults results = client.finalResults();
+        QueryStatusInfo results = client.finalStatusInfo();
         StatementStats stats = results.getStats();
 
         int nodes = stats.getNodes();
@@ -193,7 +194,11 @@ Parallelism: 2.5
                     formatDataRate(bytes(stats.getProcessedBytes() / nodes), wallTime, true));
             reprintLine(perNodeSummary);
 
+            // Parallelism: 5.3
             out.println(String.format("Parallelism: %.1f", parallelism));
+
+            //Peak Memory: 1.97GB
+            reprintLine("Peak Memory: " + formatDataSize(bytes(stats.getPeakMemoryBytes()), true));
         }
 
         // 0:32 [2.12GB, 15M rows] [67MB/s, 463K rows/s]
@@ -210,7 +215,7 @@ Parallelism: 2.5
         out.println();
     }
 
-    private void printQueryInfo(QueryResults results)
+    private void printQueryInfo(QueryStatusInfo results)
     {
         StatementStats stats = results.getStats();
         Duration wallTime = nanosSince(start);
@@ -280,7 +285,11 @@ Parallelism: 2.5
                         formatDataRate(bytes(stats.getProcessedBytes() / nodes), wallTime, true));
                 reprintLine(perNodeSummary);
 
+                // Parallelism: 5.3
                 reprintLine(String.format("Parallelism: %.1f", parallelism));
+
+                //Peak Memory: 1.97GB
+                reprintLine("Peak Memory: " + formatDataSize(bytes(stats.getPeakMemoryBytes()), true));
             }
 
             verify(terminalWidth >= 75); // otherwise handled above
@@ -318,8 +327,6 @@ Parallelism: 2.5
 
                 reprintLine(progressLine);
             }
-
-            // todo Mem: 1949M shared, 7594M private
 
             // blank line
             reprintLine("");

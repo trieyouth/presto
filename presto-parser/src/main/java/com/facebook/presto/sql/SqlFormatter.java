@@ -55,6 +55,7 @@ import com.facebook.presto.sql.tree.NaturalJoin;
 import com.facebook.presto.sql.tree.Node;
 import com.facebook.presto.sql.tree.OrderBy;
 import com.facebook.presto.sql.tree.Prepare;
+import com.facebook.presto.sql.tree.Property;
 import com.facebook.presto.sql.tree.QualifiedName;
 import com.facebook.presto.sql.tree.Query;
 import com.facebook.presto.sql.tree.QuerySpecification;
@@ -69,6 +70,7 @@ import com.facebook.presto.sql.tree.Row;
 import com.facebook.presto.sql.tree.SampledRelation;
 import com.facebook.presto.sql.tree.Select;
 import com.facebook.presto.sql.tree.SelectItem;
+import com.facebook.presto.sql.tree.SetPath;
 import com.facebook.presto.sql.tree.SetSession;
 import com.facebook.presto.sql.tree.ShowCatalogs;
 import com.facebook.presto.sql.tree.ShowColumns;
@@ -97,7 +99,6 @@ import com.google.common.base.Strings;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -613,6 +614,10 @@ public final class SqlFormatter
                     builder.append(" LIKE ")
                             .append(formatStringLiteral(value)));
 
+            node.getEscape().ifPresent((value) ->
+                    builder.append(" ESCAPE ")
+                            .append(formatStringLiteral(value)));
+
             return null;
         }
 
@@ -627,6 +632,10 @@ public final class SqlFormatter
 
             node.getLikePattern().ifPresent(value ->
                     builder.append(" LIKE ")
+                            .append(formatStringLiteral(value)));
+
+            node.getEscape().ifPresent(value ->
+                    builder.append(" ESCAPE ")
                             .append(formatStringLiteral(value)));
 
             return null;
@@ -727,8 +736,7 @@ public final class SqlFormatter
                 builder.append("IF NOT EXISTS ");
             }
             builder.append(formatName(node.getSchemaName()));
-
-            appendTableProperties(builder, node.getProperties());
+            builder.append(formatProperties(node.getProperties()));
 
             return null;
         }
@@ -776,7 +784,7 @@ public final class SqlFormatter
                 builder.append("\nCOMMENT " + formatStringLiteral(node.getComment().get()));
             }
 
-            appendTableProperties(builder, node.getProperties());
+            builder.append(formatProperties(node.getProperties()));
 
             builder.append(" AS ");
             process(node.getQuery(), indent);
@@ -830,21 +838,23 @@ public final class SqlFormatter
                 builder.append("\nCOMMENT " + formatStringLiteral(node.getComment().get()));
             }
 
-            appendTableProperties(builder, node.getProperties());
+            builder.append(formatProperties(node.getProperties()));
 
             return null;
         }
 
-        private void appendTableProperties(StringBuilder builder, Map<String, Expression> properties)
+        private String formatProperties(List<Property> properties)
         {
-            if (!properties.isEmpty()) {
-                builder.append("\nWITH (\n");
-                String propertyList = properties.entrySet().stream()
-                        .map(entry -> INDENT + formatName(entry.getKey()) + " = " + formatExpression(entry.getValue(), parameters))
-                        .collect(joining(",\n"));
-                builder.append(propertyList);
-                builder.append("\n").append(")");
+            if (properties.isEmpty()) {
+                return "";
             }
+            String propertyList = properties.stream()
+                    .map(element -> INDENT +
+                            formatExpression(element.getName(), parameters) + " = " +
+                            formatExpression(element.getValue(), parameters))
+                    .collect(joining(",\n"));
+
+            return "\nWITH (\n" + propertyList + "\n)";
         }
 
         private static String formatName(String name)
@@ -926,14 +936,15 @@ public final class SqlFormatter
         protected Void visitInsert(Insert node, Integer indent)
         {
             builder.append("INSERT INTO ")
-                    .append(node.getTarget())
-                    .append(" ");
+                    .append(node.getTarget());
 
             if (node.getColumns().isPresent()) {
-                builder.append("(")
+                builder.append(" (")
                         .append(Joiner.on(", ").join(node.getColumns().get()))
-                        .append(") ");
+                        .append(")");
             }
+
+            builder.append("\n");
 
             process(node.getQuery(), indent);
 
@@ -1120,6 +1131,15 @@ public final class SqlFormatter
                 }
                 builder.append(node.getTableName().get());
             }
+
+            return null;
+        }
+
+        @Override
+        public Void visitSetPath(SetPath node, Integer indent)
+        {
+            builder.append("SET PATH ");
+            builder.append(Joiner.on(", ").join(node.getPathSpecification().getPath()));
 
             return null;
         }

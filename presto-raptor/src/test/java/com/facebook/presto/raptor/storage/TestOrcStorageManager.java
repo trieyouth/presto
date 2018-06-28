@@ -80,6 +80,7 @@ import static com.facebook.presto.spi.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.spi.type.VarcharType.createVarcharType;
+import static com.facebook.presto.testing.DateTimeTestingUtils.sqlTimestampOf;
 import static com.facebook.presto.testing.MaterializedResult.materializeSourceDataStream;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
 import static com.facebook.presto.testing.TestingConnectorSession.SESSION;
@@ -108,7 +109,7 @@ import static org.testng.FileAssert.assertFile;
 @Test(singleThreaded = true)
 public class TestOrcStorageManager
 {
-    private static final ISOChronology UTC_CHRONOLOGY = ISOChronology.getInstance(UTC);
+    private static final ISOChronology UTC_CHRONOLOGY = ISOChronology.getInstanceUTC();
     private static final DateTime EPOCH = new DateTime(0, UTC_CHRONOLOGY);
     private static final String CURRENT_NODE = "node";
     private static final String CONNECTOR_ID = "test";
@@ -118,7 +119,7 @@ public class TestOrcStorageManager
     private static final int MAX_SHARD_ROWS = 100;
     private static final DataSize MAX_FILE_SIZE = new DataSize(1, MEGABYTE);
     private static final Duration MISSING_SHARD_DISCOVERY = new Duration(5, TimeUnit.MINUTES);
-    private static final ReaderAttributes READER_ATTRIBUTES = new ReaderAttributes(new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE));
+    private static final ReaderAttributes READER_ATTRIBUTES = new ReaderAttributes(new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), true);
 
     private final NodeManager nodeManager = new TestingNodeManager();
     private Handle dummyHandle;
@@ -131,7 +132,6 @@ public class TestOrcStorageManager
 
     @BeforeMethod
     public void setup()
-            throws Exception
     {
         temporary = createTempDir();
         File directory = new File(temporary, "data");
@@ -358,7 +358,6 @@ public class TestOrcStorageManager
 
     @Test
     public void testWriterRollback()
-            throws Exception
     {
         // verify staging directory is empty
         File staging = new File(new File(temporary, "data"), "staging");
@@ -502,7 +501,6 @@ public class TestOrcStorageManager
 
     @Test
     public void testMaxShardRows()
-            throws Exception
     {
         OrcStorageManager manager = createOrcStorageManager(2, new DataSize(2, MEGABYTE));
 
@@ -520,7 +518,6 @@ public class TestOrcStorageManager
 
     @Test
     public void testMaxFileSize()
-            throws Exception
     {
         List<Long> columnIds = ImmutableList.of(3L, 7L);
         List<Type> columnTypes = ImmutableList.of(BIGINT, createVarcharType(5));
@@ -564,13 +561,11 @@ public class TestOrcStorageManager
     }
 
     public static OrcStorageManager createOrcStorageManager(IDBI dbi, File temporary)
-            throws IOException
     {
         return createOrcStorageManager(dbi, temporary, MAX_SHARD_ROWS);
     }
 
     public static OrcStorageManager createOrcStorageManager(IDBI dbi, File temporary, int maxShardRows)
-            throws IOException
     {
         File directory = new File(temporary, "data");
         StorageService storageService = new FileStorageService(directory);
@@ -688,7 +683,6 @@ public class TestOrcStorageManager
 
     private static SqlTimestamp sqlTimestamp(int year, int month, int day, int hour, int minute, int second)
     {
-        DateTime dateTime = new DateTime(year, month, day, hour, minute, second, 0, UTC);
-        return new SqlTimestamp(dateTime.getMillis(), UTC_KEY);
+        return sqlTimestampOf(year, month, day, hour, minute, second, 0, UTC, UTC_KEY, SESSION);
     }
 }

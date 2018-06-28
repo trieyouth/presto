@@ -31,6 +31,7 @@ import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SchemaTablePrefix;
+import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableIdentity;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.security.GrantInfo;
@@ -73,6 +74,17 @@ public interface ConnectorMetadata
      * Returns a table handle for the specified table name, or null if the connector does not contain the table.
      */
     ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName);
+
+    /**
+     * Returns the system table for the specified table name, if one exists.
+     * The system tables handled via {@link #getSystemTable} differ form those returned by {@link Connector#getSystemTables()}.
+     * The former mechanism allows dynamic resolution of system tables, while the latter is
+     * based on static list of system tables built during startup.
+     */
+    default Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
+    {
+        return Optional.empty();
+    }
 
     /**
      * Return a list of table layouts that satisfy the given constraint.
@@ -164,8 +176,10 @@ public interface ConnectorMetadata
 
     /**
      * Creates a table using the specified table metadata.
+     *
+     * @throws PrestoException with {@code ALREADY_EXISTS} if the table already exists and {@param ignoreExisting} is not set
      */
-    default void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    default void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating tables");
     }
@@ -228,7 +242,7 @@ public interface ConnectorMetadata
         List<ConnectorTableLayout> layouts = getTableLayouts(session, tableHandle, new Constraint<>(TupleDomain.all(), map -> true), Optional.empty())
                 .stream()
                 .map(ConnectorTableLayoutResult::getTableLayout)
-                .filter(layout -> layout.getNodePartitioning().isPresent())
+                .filter(layout -> layout.getTablePartitioning().isPresent())
                 .collect(toList());
 
         if (layouts.isEmpty()) {
@@ -240,10 +254,10 @@ public interface ConnectorMetadata
         }
 
         ConnectorTableLayout layout = layouts.get(0);
-        ConnectorPartitioningHandle partitioningHandle = layout.getNodePartitioning().get().getPartitioningHandle();
+        ConnectorPartitioningHandle partitioningHandle = layout.getTablePartitioning().get().getPartitioningHandle();
         Map<ColumnHandle, String> columnNamesByHandle = getColumnHandles(session, tableHandle).entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getValue, Map.Entry::getKey));
-        List<String> partitionColumns = layout.getNodePartitioning().get().getPartitioningColumns().stream()
+        List<String> partitionColumns = layout.getTablePartitioning().get().getPartitioningColumns().stream()
                 .map(columnNamesByHandle::get)
                 .collect(toList());
 

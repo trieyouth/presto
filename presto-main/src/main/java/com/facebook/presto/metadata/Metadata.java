@@ -21,6 +21,8 @@ import com.facebook.presto.spi.ColumnIdentity;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.Constraint;
+import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableIdentity;
 import com.facebook.presto.spi.block.BlockEncodingSerde;
 import com.facebook.presto.spi.connector.ConnectorOutputMetadata;
@@ -55,12 +57,16 @@ public interface Metadata
 
     boolean schemaExists(Session session, CatalogSchemaName schema);
 
+    boolean catalogExists(Session session, String catalogName);
+
     List<String> listSchemaNames(Session session, String catalogName);
 
     /**
      * Returns a table handle for the specified table name.
      */
     Optional<TableHandle> getTableHandle(Session session, QualifiedObjectName tableName);
+
+    Optional<SystemTable> getSystemTable(Session session, QualifiedObjectName tableName);
 
     List<TableLayoutResult> getLayouts(Session session, TableHandle tableHandle, Constraint<ColumnHandle> constraint, Optional<Set<ColumnHandle>> desiredColumns);
 
@@ -121,8 +127,10 @@ public interface Metadata
 
     /**
      * Creates a table using the specified table metadata.
+     *
+     * @throws PrestoException with {@code ALREADY_EXISTS} if the table already exists and {@param ignoreExisting} is not set
      */
-    void createTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
+    void createTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata, boolean ignoreExisting);
 
     /**
      * Rename the specified table.

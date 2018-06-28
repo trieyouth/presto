@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.hive.HiveColumnHandle.ColumnType;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.google.common.collect.ImmutableList;
@@ -20,10 +21,13 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import org.testng.annotations.Test;
 
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Properties;
 
+import static com.facebook.presto.hive.HiveType.HIVE_LONG;
 import static com.facebook.presto.hive.HiveType.HIVE_STRING;
+import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static org.testng.Assert.assertEquals;
 
 public class TestHiveSplit
@@ -37,16 +41,15 @@ public class TestHiveSplit
         schema.setProperty("foo", "bar");
         schema.setProperty("bar", "baz");
 
-        ImmutableList<HivePartitionKey> partitionKeys = ImmutableList.of(new HivePartitionKey("a", HIVE_STRING, "apple"), new HivePartitionKey("b", HiveType.HIVE_LONG, "42"));
+        ImmutableList<HivePartitionKey> partitionKeys = ImmutableList.of(new HivePartitionKey("a", "apple"), new HivePartitionKey("b", "42"));
         ImmutableList<HostAddress> addresses = ImmutableList.of(HostAddress.fromParts("127.0.0.1", 44), HostAddress.fromParts("127.0.0.1", 45));
         HiveSplit expected = new HiveSplit(
-                "clientId",
                 "db",
                 "table",
                 "partitionId",
                 "path",
                 42,
-                88,
+                87,
                 88,
                 schema,
                 partitionKeys,
@@ -54,12 +57,15 @@ public class TestHiveSplit
                 OptionalInt.empty(),
                 true,
                 TupleDomain.all(),
-                ImmutableMap.of(1, HIVE_STRING));
+                ImmutableMap.of(1, HIVE_STRING),
+                Optional.of(new HiveSplit.BucketConversion(
+                        32,
+                        16,
+                        ImmutableList.of(new HiveColumnHandle("col", HIVE_LONG, BIGINT.getTypeSignature(), 5, ColumnType.REGULAR, Optional.of("comment"))))));
 
         String json = codec.toJson(expected);
         HiveSplit actual = codec.fromJson(json);
 
-        assertEquals(actual.getClientId(), expected.getClientId());
         assertEquals(actual.getDatabase(), expected.getDatabase());
         assertEquals(actual.getTable(), expected.getTable());
         assertEquals(actual.getPartitionName(), expected.getPartitionName());
@@ -71,6 +77,7 @@ public class TestHiveSplit
         assertEquals(actual.getPartitionKeys(), expected.getPartitionKeys());
         assertEquals(actual.getAddresses(), expected.getAddresses());
         assertEquals(actual.getColumnCoercions(), expected.getColumnCoercions());
+        assertEquals(actual.getBucketConversion(), expected.getBucketConversion());
         assertEquals(actual.isForceLocalScheduling(), expected.isForceLocalScheduling());
     }
 }

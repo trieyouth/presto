@@ -17,7 +17,7 @@ import com.facebook.presto.Session;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.sql.planner.StatsRecorder;
+import com.facebook.presto.sql.planner.RuleStatsRecorder;
 import com.facebook.presto.sql.planner.optimizations.PlanOptimizer;
 import com.facebook.presto.sql.planner.plan.Assignments;
 import com.facebook.presto.sql.planner.plan.PlanNode;
@@ -30,8 +30,6 @@ import com.google.common.collect.ImmutableSet;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
-
-import java.util.Optional;
 
 import static com.facebook.presto.spi.StandardErrorCode.OPTIMIZER_TIMEOUT;
 import static com.facebook.presto.sql.planner.plan.Patterns.project;
@@ -65,13 +63,18 @@ public class TestIterativeOptimizer
     {
         if (queryRunner != null) {
             queryRunner.close();
+            queryRunner = null;
         }
     }
 
     @Test(timeOut = 1000)
     public void optimizerTimeoutsOnNonConvergingPlan()
     {
-        PlanOptimizer optimizer = new IterativeOptimizer(new StatsRecorder(), ImmutableSet.of(new NonConvergingRule()));
+        PlanOptimizer optimizer = new IterativeOptimizer(
+                new RuleStatsRecorder(),
+                queryRunner.getStatsCalculator(),
+                queryRunner.getCostCalculator(),
+                ImmutableSet.of(new NonConvergingRule()));
 
         try {
             queryRunner.inTransaction(transactionSession -> {
@@ -98,13 +101,13 @@ public class TestIterativeOptimizer
         // In that case, it will be removed.
         // Thanks to that approach, it never converges and always produces different node.
         @Override
-        public Optional<PlanNode> apply(ProjectNode project, Captures captures, Context context)
+        public Result apply(ProjectNode project, Captures captures, Context context)
         {
             if (isIdentityProjection(project)) {
-                return Optional.of(project.getSource());
+                return Result.ofPlanNode(project.getSource());
             }
             PlanNode projectNode = new ProjectNode(context.getIdAllocator().getNextId(), project, Assignments.identity(project.getOutputSymbols()));
-            return Optional.of(projectNode);
+            return Result.ofPlanNode(projectNode);
         }
 
         private static boolean isIdentityProjection(ProjectNode project)

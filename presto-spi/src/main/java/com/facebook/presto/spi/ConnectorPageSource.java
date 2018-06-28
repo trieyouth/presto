@@ -23,13 +23,6 @@ public interface ConnectorPageSource
     CompletableFuture<?> NOT_BLOCKED = CompletableFuture.completedFuture(null);
 
     /**
-     * Gets the total input bytes that will be processed by this page source.
-     * This is normally the same size as the split.  If size is not available,
-     * this method should return zero.
-     */
-    long getTotalBytes();
-
-    /**
      * Gets the number of input bytes processed by this page source so far.
      * If size is not available, this method should return zero.
      */
@@ -52,10 +45,10 @@ public interface ConnectorPageSource
     Page getNextPage();
 
     /**
-     * Get the total memory that needs to be reserved in the system memory pool.
+     * Get the total memory that needs to be reserved in the general memory pool.
      * This memory should include any buffers, etc. that are used for reading data.
      *
-     * @return the system memory used so far in table read
+     * @return the memory used so far in table read
      */
     long getSystemMemoryUsage();
 

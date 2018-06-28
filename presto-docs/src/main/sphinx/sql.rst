@@ -15,15 +15,20 @@ This chapter describes the SQL syntax used in Presto.
     sql/create-table
     sql/create-table-as
     sql/create-view
+    sql/deallocate-prepare
     sql/delete
     sql/describe
+    sql/describe-input
+    sql/describe-output
     sql/drop-schema
     sql/drop-table
     sql/drop-view
+    sql/execute
     sql/explain
     sql/explain-analyze
     sql/grant
     sql/insert
+    sql/prepare
     sql/reset-session
     sql/revoke
     sql/rollback
@@ -35,7 +40,6 @@ This chapter describes the SQL syntax used in Presto.
     sql/show-create-view
     sql/show-functions
     sql/show-grants
-    sql/show-partitions
     sql/show-schemas
     sql/show-session
     sql/show-tables

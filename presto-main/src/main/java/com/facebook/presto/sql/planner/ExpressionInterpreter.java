@@ -21,16 +21,15 @@ import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.operator.scalar.ArraySubscriptOperator;
 import com.facebook.presto.operator.scalar.ScalarFunctionImplementation;
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.spi.RecordCursor;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.RowBlockBuilder;
 import com.facebook.presto.spi.function.OperatorType;
 import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.RowType;
-import com.facebook.presto.spi.type.RowType.RowField;
+import com.facebook.presto.spi.type.RowType.Field;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
@@ -39,6 +38,8 @@ import com.facebook.presto.sql.analyzer.ExpressionAnalyzer;
 import com.facebook.presto.sql.analyzer.Scope;
 import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.facebook.presto.sql.analyzer.SemanticException;
+import com.facebook.presto.sql.planner.iterative.rule.DesugarCurrentPath;
+import com.facebook.presto.sql.planner.iterative.rule.DesugarCurrentUser;
 import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.ArithmeticUnaryExpression;
 import com.facebook.presto.sql.tree.ArrayConstructor;
@@ -50,12 +51,12 @@ import com.facebook.presto.sql.tree.Cast;
 import com.facebook.presto.sql.tree.CoalesceExpression;
 import com.facebook.presto.sql.tree.ComparisonExpression;
 import com.facebook.presto.sql.tree.ComparisonExpressionType;
+import com.facebook.presto.sql.tree.CurrentPath;
+import com.facebook.presto.sql.tree.CurrentUser;
 import com.facebook.presto.sql.tree.DefaultTraversalVisitor;
 import com.facebook.presto.sql.tree.DereferenceExpression;
 import com.facebook.presto.sql.tree.ExistsPredicate;
 import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.ExpressionRewriter;
-import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
 import com.facebook.presto.sql.tree.FieldReference;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.Identifier;
@@ -84,13 +85,11 @@ import com.facebook.presto.sql.tree.StringLiteral;
 import com.facebook.presto.sql.tree.SubqueryExpression;
 import com.facebook.presto.sql.tree.SubscriptExpression;
 import com.facebook.presto.sql.tree.SymbolReference;
-import com.facebook.presto.sql.tree.TryExpression;
 import com.facebook.presto.sql.tree.WhenClause;
 import com.facebook.presto.type.FunctionType;
 import com.facebook.presto.type.LikeFunctions;
 import com.facebook.presto.util.Failures;
 import com.facebook.presto.util.FastutilSetHelper;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -107,10 +106,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.facebook.presto.SystemSessionProperties.isLegacyRowFieldOrdinalAccessEnabled;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.spi.type.TypeUtils.writeNativeValue;
@@ -118,29 +120,30 @@ import static com.facebook.presto.spi.type.VarcharType.createVarcharType;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.createConstantAnalyzer;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.EXPRESSION_NOT_CONSTANT;
 import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static com.facebook.presto.sql.gen.TryCodeGenerator.tryExpressionExceptionHandler;
 import static com.facebook.presto.sql.gen.VarArgsToMapAdapterGenerator.generateVarArgsToMapAdapter;
-import static com.facebook.presto.sql.planner.LiteralInterpreter.toExpression;
-import static com.facebook.presto.sql.planner.LiteralInterpreter.toExpressions;
 import static com.facebook.presto.sql.planner.iterative.rule.CanonicalizeExpressionRewriter.canonicalizeExpression;
 import static com.facebook.presto.type.LikeFunctions.isLikePattern;
 import static com.facebook.presto.type.LikeFunctions.unescapeLiteralLikePattern;
+import static com.facebook.presto.util.LegacyRowFieldOrdinalAccessUtil.parseAnonymousRowFieldOrdinalAccess;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Predicates.instanceOf;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class ExpressionInterpreter
 {
     private final Expression expression;
     private final Metadata metadata;
+    private final LiteralEncoder literalEncoder;
     private final ConnectorSession session;
     private final boolean optimize;
     private final Map<NodeRef<Expression>, Type> expressionTypes;
     private final FunctionInvoker functionInvoker;
+    private final boolean legacyRowFieldOrdinalAccess;
 
     private final Visitor visitor;
 
@@ -150,10 +153,6 @@ public class ExpressionInterpreter
 
     public static ExpressionInterpreter expressionInterpreter(Expression expression, Metadata metadata, Session session, Map<NodeRef<Expression>, Type> expressionTypes)
     {
-        requireNonNull(expression, "expression is null");
-        requireNonNull(metadata, "metadata is null");
-        requireNonNull(session, "session is null");
-
         return new ExpressionInterpreter(expression, metadata, session, expressionTypes, false);
     }
 
@@ -173,22 +172,24 @@ public class ExpressionInterpreter
 
         Type actualType = analyzer.getExpressionTypes().get(NodeRef.of(expression));
         if (!metadata.getTypeManager().canCoerce(actualType, expectedType)) {
-            throw new SemanticException(SemanticErrorCode.TYPE_MISMATCH, expression, String.format("Cannot cast type %s to %s",
-                    expectedType.getTypeSignature(),
-                    actualType.getTypeSignature()));
+            throw new SemanticException(SemanticErrorCode.TYPE_MISMATCH, expression, format("Cannot cast type %s to %s",
+                    actualType.getTypeSignature(),
+                    expectedType.getTypeSignature()));
         }
 
         Map<NodeRef<Expression>, Type> coercions = ImmutableMap.<NodeRef<Expression>, Type>builder()
                 .putAll(analyzer.getExpressionCoercions())
                 .put(NodeRef.of(expression), expectedType)
                 .build();
-        return evaluateConstantExpression(expression, coercions, metadata, session, ImmutableSet.of(), parameters);
+        return evaluateConstantExpression(expression, coercions, analyzer.getTypeOnlyCoercions(), metadata, session, ImmutableSet.of(), parameters);
     }
 
-    public static Object evaluateConstantExpression(
+    private static Object evaluateConstantExpression(
             Expression expression,
             Map<NodeRef<Expression>, Type> coercions,
-            Metadata metadata, Session session,
+            Set<NodeRef<Expression>> typeOnlyCoercions,
+            Metadata metadata,
+            Session session,
             Set<NodeRef<Expression>> columnReferences,
             List<Expression> parameters)
     {
@@ -197,23 +198,7 @@ public class ExpressionInterpreter
         verifyExpressionIsConstant(columnReferences, expression);
 
         // add coercions
-        Expression rewrite = ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
-        {
-            @Override
-            public Expression rewriteExpression(Expression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
-            {
-                Expression rewrittenExpression = treeRewriter.defaultRewrite(node, context);
-
-                // cast expression if coercion is registered
-                Type coerceToType = coercions.get(NodeRef.of(node));
-
-                if (coerceToType != null) {
-                    rewrittenExpression = new Cast(rewrittenExpression, coerceToType.getTypeSignature().toString());
-                }
-
-                return rewrittenExpression;
-            }
-        }, expression);
+        Expression rewrite = Coercer.addCoercions(expression, coercions, typeOnlyCoercions);
 
         // redo the analysis since above expression rewriter might create new expressions which do not have entries in the type map
         ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata, session, parameters);
@@ -232,7 +217,7 @@ public class ExpressionInterpreter
         analyzer.analyze(canonicalized, Scope.create());
 
         // evaluate the expression
-        Object result = expressionInterpreter(canonicalized, metadata, session, analyzer.getExpressionTypes()).evaluate(0);
+        Object result = expressionInterpreter(canonicalized, metadata, session, analyzer.getExpressionTypes()).evaluate();
         verify(!(result instanceof Expression), "Expression interpreter returned an unresolved expression");
         return result;
     }
@@ -244,13 +229,15 @@ public class ExpressionInterpreter
 
     private ExpressionInterpreter(Expression expression, Metadata metadata, Session session, Map<NodeRef<Expression>, Type> expressionTypes, boolean optimize)
     {
-        this.expression = expression;
-        this.metadata = metadata;
-        this.session = session.toConnectorSession();
+        this.expression = requireNonNull(expression, "expression is null");
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.literalEncoder = new LiteralEncoder(metadata.getBlockEncodingSerde());
+        this.session = requireNonNull(session, "session is null").toConnectorSession();
         this.expressionTypes = ImmutableMap.copyOf(requireNonNull(expressionTypes, "expressionTypes is null"));
         verify((expressionTypes.containsKey(NodeRef.of(expression))));
         this.optimize = optimize;
         this.functionInvoker = new FunctionInvoker(metadata.getFunctionRegistry());
+        this.legacyRowFieldOrdinalAccess = isLegacyRowFieldOrdinalAccessEnabled(session);
 
         this.visitor = new Visitor();
     }
@@ -260,22 +247,16 @@ public class ExpressionInterpreter
         return expressionTypes.get(NodeRef.of(expression));
     }
 
-    public Object evaluate(RecordCursor inputs)
+    public Object evaluate()
     {
-        checkState(!optimize, "evaluate(RecordCursor) not allowed for optimizer");
-        return visitor.process(expression, inputs);
+        checkState(!optimize, "evaluate() not allowed for optimizer");
+        return visitor.process(expression, new NoPagePositionContext());
     }
 
-    public Object evaluate(int position, Block... inputs)
+    public Object evaluate(int position, Page page)
     {
-        checkState(!optimize, "evaluate(int, Block...) not allowed for optimizer");
-        return visitor.process(expression, new SinglePagePositionContext(position, inputs));
-    }
-
-    public Object evaluate(int leftPosition, Block[] leftBlocks, int rightPosition, Block[] rightBlocks)
-    {
-        checkState(!optimize, "evaluate(int, Block[], int, Block[]) not allowed for optimizer");
-        return visitor.process(expression, new TwoPagesPositionContext(leftPosition, leftBlocks, rightPosition, rightBlocks));
+        checkState(!optimize, "evaluate(int, Page) not allowed for optimizer");
+        return visitor.process(expression, new SinglePagePositionContext(position, page));
     }
 
     public Object optimize(SymbolResolver inputs)
@@ -359,33 +340,7 @@ public class ExpressionInterpreter
                     throw new UnsupportedOperationException("not yet implemented");
                 }
             }
-            else if (context instanceof RecordCursor) {
-                RecordCursor cursor = (RecordCursor) context;
-                if (cursor.isNull(channel)) {
-                    return null;
-                }
-
-                Class<?> javaType = type.getJavaType();
-                if (javaType == boolean.class) {
-                    return cursor.getBoolean(channel);
-                }
-                else if (javaType == long.class) {
-                    return cursor.getLong(channel);
-                }
-                else if (javaType == double.class) {
-                    return cursor.getDouble(channel);
-                }
-                else if (javaType == Slice.class) {
-                    return cursor.getSlice(channel);
-                }
-                else if (javaType == Block.class) {
-                    return cursor.getObject(channel);
-                }
-                else {
-                    throw new UnsupportedOperationException("not yet implemented");
-                }
-            }
-            throw new UnsupportedOperationException("Inputs or cursor myst be set");
+            throw new UnsupportedOperationException("Inputs must be set");
         }
 
         @Override
@@ -410,15 +365,24 @@ public class ExpressionInterpreter
             RowType rowType = (RowType) type;
             Block row = (Block) base;
             Type returnType = type(node);
-            List<RowField> fields = rowType.getFields();
+            String fieldName = node.getField().getValue();
+            List<Field> fields = rowType.getFields();
             int index = -1;
             for (int i = 0; i < fields.size(); i++) {
-                RowField field = fields.get(i);
-                if (field.getName().isPresent() && field.getName().get().equalsIgnoreCase(node.getField().getValue())) {
+                Field field = fields.get(i);
+                if (field.getName().isPresent() && field.getName().get().equalsIgnoreCase(fieldName)) {
                     checkArgument(index < 0, "Ambiguous field %s in type %s", field, rowType.getDisplayName());
                     index = i;
                 }
             }
+
+            if (legacyRowFieldOrdinalAccess && index < 0) {
+                OptionalInt rowIndex = parseAnonymousRowFieldOrdinalAccess(fieldName, fields);
+                if (rowIndex.isPresent()) {
+                    index = rowIndex.getAsInt();
+                }
+            }
+
             checkState(index >= 0, "could not find field name: %s", node.getField());
             if (row.isNull(index)) {
                 return null;
@@ -445,7 +409,11 @@ public class ExpressionInterpreter
         @Override
         protected Object visitIdentifier(Identifier node, Object context)
         {
-            return node;
+            // Identifier only exists before planning.
+            // ExpressionInterpreter should only be invoked after planning.
+            // As a result, this method should be unreachable.
+            // However, RelationPlanner.visitUnnest and visitValues invokes evaluateConstantExpression.
+            return ((SymbolResolver) context).getValue(new Symbol(node.getValue()));
         }
 
         @Override
@@ -638,9 +606,6 @@ public class ExpressionInterpreter
         protected Object visitInPredicate(InPredicate node, Object context)
         {
             Object value = process(node.getValue(), context);
-            if (value == null) {
-                return null;
-            }
 
             Expression valueListExpression = node.getValueList();
             if (!(valueListExpression instanceof InListExpression)) {
@@ -650,6 +615,10 @@ public class ExpressionInterpreter
                 return node;
             }
             InListExpression valueList = (InListExpression) valueListExpression;
+            verify(!valueList.getValues().isEmpty()); // `NULL IN ()` would be false, but is not possible
+            if (value == null) {
+                return null;
+            }
 
             Set<?> set = inListCache.get(valueList);
 
@@ -903,11 +872,16 @@ public class ExpressionInterpreter
         protected Object visitLogicalBinaryExpression(LogicalBinaryExpression node, Object context)
         {
             Object left = process(node.getLeft(), context);
-            Object right = process(node.getRight(), context);
+            Object right;
 
             switch (node.getType()) {
                 case AND: {
-                    // if either left or right is false, result is always false regardless of nulls
+                    if (Boolean.FALSE.equals(left)) {
+                        return false;
+                    }
+
+                    right = process(node.getRight(), context);
+
                     if (Boolean.FALSE.equals(left) || Boolean.TRUE.equals(right)) {
                         return left;
                     }
@@ -918,7 +892,12 @@ public class ExpressionInterpreter
                     break;
                 }
                 case OR: {
-                    // if either left or right is true, result is always true regardless of nulls
+                    if (Boolean.TRUE.equals(left)) {
+                        return true;
+                    }
+
+                    right = process(node.getRight(), context);
+
                     if (Boolean.TRUE.equals(left) || Boolean.FALSE.equals(right)) {
                         return left;
                     }
@@ -928,6 +907,8 @@ public class ExpressionInterpreter
                     }
                     break;
                 }
+                default:
+                    throw new IllegalStateException("Unknown LogicalBinaryExpression#Type");
             }
 
             if (left == null && right == null) {
@@ -960,7 +941,7 @@ public class ExpressionInterpreter
             ScalarFunctionImplementation function = metadata.getFunctionRegistry().getScalarFunctionImplementation(functionSignature);
             for (int i = 0; i < argumentValues.size(); i++) {
                 Object value = argumentValues.get(i);
-                if (value == null && !function.getNullableArguments().get(i)) {
+                if (value == null && function.getArgumentProperty(i).getNullConvention() == RETURN_NULL_ON_NULL) {
                     return null;
                 }
             }
@@ -1119,28 +1100,20 @@ public class ExpressionInterpreter
         }
 
         @Override
-        protected Object visitTryExpression(TryExpression node, Object context)
-        {
-            try {
-                Object innerExpression = process(node.getInnerExpression(), context);
-                if (innerExpression instanceof Expression) {
-                    return new TryExpression((Expression) innerExpression);
-                }
-
-                return innerExpression;
-            }
-            catch (PrestoException e) {
-                tryExpressionExceptionHandler(e);
-            }
-            return null;
-        }
-
-        @Override
         public Object visitCast(Cast node, Object context)
         {
             Object value = process(node.getExpression(), context);
+            Type targetType = metadata.getType(parseTypeSignature(node.getType()));
+            if (targetType == null) {
+                throw new IllegalArgumentException("Unsupported type: " + node.getType());
+            }
 
+            Type sourceType = type(node.getExpression());
             if (value instanceof Expression) {
+                if (targetType.equals(sourceType)) {
+                    return value;
+                }
+
                 return new Cast((Expression) value, node.getType(), node.isSafe(), node.isTypeOnly());
             }
 
@@ -1151,19 +1124,14 @@ public class ExpressionInterpreter
             // hack!!! don't optimize CASTs for types that cannot be represented in the SQL AST
             // TODO: this will not be an issue when we migrate to RowExpression tree for this, which allows arbitrary literals.
             if (optimize && !FunctionRegistry.isSupportedLiteralType(type(node))) {
-                return new Cast(toExpression(value, type(node.getExpression())), node.getType(), node.isSafe(), node.isTypeOnly());
+                return new Cast(toExpression(value, sourceType), node.getType(), node.isSafe(), node.isTypeOnly());
             }
 
             if (value == null) {
                 return null;
             }
 
-            Type type = metadata.getType(parseTypeSignature(node.getType()));
-            if (type == null) {
-                throw new IllegalArgumentException("Unsupported type: " + node.getType());
-            }
-
-            Signature operator = metadata.getFunctionRegistry().getCoercion(type(node.getExpression()), type);
+            Signature operator = metadata.getFunctionRegistry().getCoercion(sourceType, targetType);
 
             try {
                 return functionInvoker.invoke(operator, session, ImmutableList.of(value));
@@ -1180,7 +1148,7 @@ public class ExpressionInterpreter
         protected Object visitArrayConstructor(ArrayConstructor node, Object context)
         {
             Type elementType = ((ArrayType) type(node)).getElementType();
-            BlockBuilder arrayBlockBuilder = elementType.createBlockBuilder(new BlockBuilderStatus(), node.getValues().size());
+            BlockBuilder arrayBlockBuilder = elementType.createBlockBuilder(null, node.getValues().size());
 
             for (Expression expression : node.getValues()) {
                 Object value = process(expression, context);
@@ -1191,6 +1159,18 @@ public class ExpressionInterpreter
             }
 
             return arrayBlockBuilder.build();
+        }
+
+        @Override
+        protected Object visitCurrentUser(CurrentUser node, Object context)
+        {
+            return visitFunctionCall(DesugarCurrentUser.getCall(node), context);
+        }
+
+        @Override
+        protected Object visitCurrentPath(CurrentPath node, Object context)
+        {
+            return visitFunctionCall(DesugarCurrentPath.getCall(node), context);
         }
 
         @Override
@@ -1209,7 +1189,7 @@ public class ExpressionInterpreter
                 return new Row(toExpressions(values, parameterTypes));
             }
             else {
-                BlockBuilder blockBuilder = new RowBlockBuilder(parameterTypes, new BlockBuilderStatus(), 1);
+                BlockBuilder blockBuilder = new RowBlockBuilder(parameterTypes, null, 1);
                 BlockBuilder singleRowBlockWriter = blockBuilder.beginBlockEntry();
                 for (int i = 0; i < cardinality; ++i) {
                     writeNativeValue(parameterTypes.get(i), singleRowBlockWriter, values.get(i));
@@ -1285,6 +1265,16 @@ public class ExpressionInterpreter
             Signature operatorSignature = metadata.getFunctionRegistry().resolveOperator(operatorType, argumentTypes);
             return functionInvoker.invoke(operatorSignature, session, argumentValues);
         }
+
+        private Expression toExpression(Object base, Type type)
+        {
+            return literalEncoder.toExpression(base, type);
+        }
+
+        private List<Expression> toExpressions(List<Object> values, List<Type> types)
+        {
+            return literalEncoder.toExpressions(values, types);
+        }
     }
 
     private interface PagePositionContext
@@ -1294,22 +1284,38 @@ public class ExpressionInterpreter
         int getPosition(int channel);
     }
 
+    private static class NoPagePositionContext
+            implements PagePositionContext
+    {
+        @Override
+        public Block getBlock(int channel)
+        {
+            throw new IllegalArgumentException("Context does not contain any blocks");
+        }
+
+        @Override
+        public int getPosition(int channel)
+        {
+            throw new IllegalArgumentException("Context does not have a position");
+        }
+    }
+
     private static class SinglePagePositionContext
             implements PagePositionContext
     {
         private final int position;
-        private final Block[] blocks;
+        private final Page page;
 
-        private SinglePagePositionContext(int position, Block[] blocks)
+        private SinglePagePositionContext(int position, Page page)
         {
             this.position = position;
-            this.blocks = blocks;
+            this.page = page;
         }
 
         @Override
         public Block getBlock(int channel)
         {
-            return blocks[channel];
+            return page.getBlock(channel);
         }
 
         @Override
@@ -1319,47 +1325,7 @@ public class ExpressionInterpreter
         }
     }
 
-    private static class TwoPagesPositionContext
-            implements PagePositionContext
-    {
-        private final int leftPosition;
-        private final int rightPosition;
-        private final Block[] leftBlocks;
-        private final Block[] rightBlocks;
-
-        private TwoPagesPositionContext(int leftPosition, Block[] leftBlocks, int rightPosition, Block[] rightBlocks)
-        {
-            this.leftPosition = leftPosition;
-            this.rightPosition = rightPosition;
-            this.leftBlocks = leftBlocks;
-            this.rightBlocks = rightBlocks;
-        }
-
-        @Override
-        public Block getBlock(int channel)
-        {
-            if (channel < leftBlocks.length) {
-                return leftBlocks[channel];
-            }
-            else {
-                return rightBlocks[channel - leftBlocks.length];
-            }
-        }
-
-        @Override
-        public int getPosition(int channel)
-        {
-            if (channel < leftBlocks.length) {
-                return leftPosition;
-            }
-            else {
-                return rightPosition;
-            }
-        }
-    }
-
-    @VisibleForTesting
-    public static Expression createFailureFunction(RuntimeException exception, Type type)
+    private static Expression createFailureFunction(RuntimeException exception, Type type)
     {
         requireNonNull(exception, "Exception is null");
 

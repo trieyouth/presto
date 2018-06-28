@@ -17,11 +17,14 @@ import com.facebook.presto.operator.exchange.LocalPartitionGenerator;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.type.Type;
+import com.google.common.io.Closer;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.NotThreadSafe;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -81,6 +84,8 @@ public class PartitionedLookupSource
     @Nullable
     private final OuterPositionTracker outerPositionTracker;
 
+    private boolean closed;
+
     private PartitionedLookupSource(List<? extends LookupSource> lookupSources, List<Type> hashChannelTypes, Optional<OuterPositionTracker> outerPositionTracker)
     {
         this.lookupSources = lookupSources.toArray(new LookupSource[lookupSources.size()]);
@@ -96,6 +101,12 @@ public class PartitionedLookupSource
         this.partitionMask = lookupSources.size() - 1;
         this.shiftSize = numberOfTrailingZeros(lookupSources.size()) + 1;
         this.outerPositionTracker = outerPositionTracker.orElse(null);
+    }
+
+    @Override
+    public boolean isEmpty()
+    {
+        return Arrays.stream(lookupSources).allMatch(LookupSource::isEmpty);
     }
 
     @Override
@@ -121,7 +132,7 @@ public class PartitionedLookupSource
     @Override
     public long getJoinPosition(int position, Page hashChannelsPage, Page allChannelsPage)
     {
-        return getJoinPosition(position, hashChannelsPage, allChannelsPage, partitionGenerator.getRawHash(position, hashChannelsPage));
+        return getJoinPosition(position, hashChannelsPage, allChannelsPage, partitionGenerator.getRawHash(hashChannelsPage, position));
     }
 
     @Override
@@ -170,11 +181,29 @@ public class PartitionedLookupSource
     }
 
     @Override
+    public long joinPositionWithinPartition(long joinPosition)
+    {
+        return decodeJoinPosition(joinPosition);
+    }
+
+    @Override
     public void close()
     {
-        if (outerPositionTracker != null) {
-            outerPositionTracker.commit();
+        if (closed) {
+            return;
         }
+
+        try (Closer closer = Closer.create()) {
+            if (outerPositionTracker != null) {
+                closer.register(outerPositionTracker::commit);
+            }
+            Arrays.stream(lookupSources).forEach(closer::register);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        closed = true;
     }
 
     private int decodePartition(long partitionedJoinPosition)

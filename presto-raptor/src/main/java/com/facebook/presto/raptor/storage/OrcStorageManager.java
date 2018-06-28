@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.raptor.storage;
 
+import com.facebook.presto.memory.context.AggregatedMemoryContext;
 import com.facebook.presto.orc.FileOrcDataSource;
 import com.facebook.presto.orc.OrcDataSource;
 import com.facebook.presto.orc.OrcPredicate;
@@ -20,8 +21,6 @@ import com.facebook.presto.orc.OrcReader;
 import com.facebook.presto.orc.OrcRecordReader;
 import com.facebook.presto.orc.TupleDomainOrcPredicate;
 import com.facebook.presto.orc.TupleDomainOrcPredicate.ColumnReference;
-import com.facebook.presto.orc.memory.AggregatedMemoryContext;
-import com.facebook.presto.orc.metadata.OrcMetadataReader;
 import com.facebook.presto.orc.metadata.OrcType;
 import com.facebook.presto.raptor.RaptorColumnHandle;
 import com.facebook.presto.raptor.RaptorConnectorId;
@@ -40,13 +39,13 @@ import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.DecimalType;
 import com.facebook.presto.spi.type.NamedTypeSignature;
+import com.facebook.presto.spi.type.RowFieldName;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.facebook.presto.spi.type.TypeSignature;
 import com.facebook.presto.spi.type.TypeSignatureParameter;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -84,6 +83,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static com.facebook.presto.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
+import static com.facebook.presto.orc.OrcEncoding.ORC;
 import static com.facebook.presto.raptor.RaptorColumnHandle.isBucketNumberColumn;
 import static com.facebook.presto.raptor.RaptorColumnHandle.isHiddenColumn;
 import static com.facebook.presto.raptor.RaptorColumnHandle.isShardRowIdColumn;
@@ -230,10 +231,10 @@ public class OrcStorageManager
     {
         OrcDataSource dataSource = openShard(shardUuid, readerAttributes);
 
-        AggregatedMemoryContext systemMemoryUsage = new AggregatedMemoryContext();
+        AggregatedMemoryContext systemMemoryUsage = newSimpleAggregatedMemoryContext();
 
         try {
-            OrcReader reader = new OrcReader(dataSource, new OrcMetadataReader(), readerAttributes.getMaxMergeDistance(), readerAttributes.getMaxReadSize(), HUGE_MAX_READ_BLOCK_SIZE);
+            OrcReader reader = new OrcReader(dataSource, ORC, readerAttributes.getMaxMergeDistance(), readerAttributes.getMaxReadSize(), readerAttributes.getTinyStripeThreshold(), HUGE_MAX_READ_BLOCK_SIZE);
 
             Map<Long, Integer> indexMap = columnIdIndex(reader.getColumnNames());
             ImmutableMap.Builder<Integer, Type> includedColumns = ImmutableMap.builder();
@@ -293,7 +294,7 @@ public class OrcStorageManager
     @Override
     public StoragePageSink createStoragePageSink(long transactionId, OptionalInt bucketNumber, List<Long> columnIds, List<Type> columnTypes, boolean checkSpace)
     {
-        if (storageService.getAvailableBytes() < minAvailableSpace.toBytes()) {
+        if (checkSpace && storageService.getAvailableBytes() < minAvailableSpace.toBytes()) {
             throw new PrestoException(RAPTOR_LOCAL_DISK_FULL, "Local disk is full on node " + nodeId);
         }
         return new OrcStoragePageSink(transactionId, columnIds, columnTypes, bucketNumber);
@@ -340,7 +341,7 @@ public class OrcStorageManager
             }
             catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw Throwables.propagate(e);
+                throw new RuntimeException(e);
             }
             catch (ExecutionException e) {
                 if (e.getCause() != null) {
@@ -364,7 +365,7 @@ public class OrcStorageManager
     private static FileOrcDataSource fileOrcDataSource(ReaderAttributes readerAttributes, File file)
             throws FileNotFoundException
     {
-        return new FileOrcDataSource(file, readerAttributes.getMaxMergeDistance(), readerAttributes.getMaxReadSize(), readerAttributes.getStreamBufferSize());
+        return new FileOrcDataSource(file, readerAttributes.getMaxMergeDistance(), readerAttributes.getMaxReadSize(), readerAttributes.getStreamBufferSize(), readerAttributes.isLazyReadSmallRanges());
     }
 
     private ShardInfo createShardInfo(UUID shardUuid, OptionalInt bucketNumber, File file, Set<String> nodes, long rowCount, long uncompressedSize)
@@ -375,7 +376,7 @@ public class OrcStorageManager
     private List<ColumnStats> computeShardStats(File file)
     {
         try (OrcDataSource dataSource = fileOrcDataSource(defaultReaderAttributes, file)) {
-            OrcReader reader = new OrcReader(dataSource, new OrcMetadataReader(), defaultReaderAttributes.getMaxMergeDistance(), defaultReaderAttributes.getMaxReadSize(), HUGE_MAX_READ_BLOCK_SIZE);
+            OrcReader reader = new OrcReader(dataSource, ORC, defaultReaderAttributes.getMaxMergeDistance(), defaultReaderAttributes.getMaxReadSize(), defaultReaderAttributes.getTinyStripeThreshold(), HUGE_MAX_READ_BLOCK_SIZE);
 
             ImmutableList.Builder<ColumnStats> list = ImmutableList.builder();
             for (ColumnInfo info : getColumnInfo(reader)) {
@@ -519,7 +520,9 @@ public class OrcStorageManager
                 List<String> fieldNames = type.getFieldNames();
                 ImmutableList.Builder<TypeSignatureParameter> fieldTypes = ImmutableList.builder();
                 for (int i = 0; i < type.getFieldCount(); i++) {
-                    fieldTypes.add(TypeSignatureParameter.of(new NamedTypeSignature(fieldNames.get(i), getType(types, type.getFieldTypeIndex(i)).getTypeSignature())));
+                    fieldTypes.add(TypeSignatureParameter.of(new NamedTypeSignature(
+                            Optional.of(new RowFieldName(fieldNames.get(i), false)),
+                            getType(types, type.getFieldTypeIndex(i)).getTypeSignature())));
                 }
                 return typeManager.getParameterizedType(StandardTypes.ROW, fieldTypes.build());
         }

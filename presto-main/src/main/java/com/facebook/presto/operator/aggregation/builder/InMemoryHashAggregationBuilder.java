@@ -14,11 +14,16 @@
 package com.facebook.presto.operator.aggregation.builder;
 
 import com.facebook.presto.array.IntBigArray;
-import com.facebook.presto.memory.LocalMemoryContext;
+import com.facebook.presto.memory.context.LocalMemoryContext;
 import com.facebook.presto.operator.GroupByHash;
 import com.facebook.presto.operator.GroupByIdBlock;
 import com.facebook.presto.operator.HashCollisionsCounter;
 import com.facebook.presto.operator.OperatorContext;
+import com.facebook.presto.operator.TransformWork;
+import com.facebook.presto.operator.UpdateMemory;
+import com.facebook.presto.operator.Work;
+import com.facebook.presto.operator.WorkProcessor;
+import com.facebook.presto.operator.WorkProcessor.ProcessorState;
 import com.facebook.presto.operator.aggregation.AccumulatorFactory;
 import com.facebook.presto.operator.aggregation.GroupedAccumulator;
 import com.facebook.presto.spi.Page;
@@ -28,7 +33,7 @@ import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.gen.JoinCompiler;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.AggregationNode.Step;
-import com.google.common.collect.AbstractIterator;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -38,10 +43,10 @@ import it.unimi.dsi.fastutil.ints.IntIterator;
 import it.unimi.dsi.fastutil.ints.IntIterators;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 
+import static com.facebook.presto.SystemSessionProperties.isDictionaryAggregationEnabled;
 import static com.facebook.presto.operator.GroupByHash.createGroupByHash;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -56,6 +61,7 @@ public class InMemoryHashAggregationBuilder
     private final boolean partial;
     private final long maxPartialMemory;
     private final LocalMemoryContext systemMemoryContext;
+    private final LocalMemoryContext localUserMemoryContext;
 
     private boolean full;
 
@@ -68,7 +74,8 @@ public class InMemoryHashAggregationBuilder
             Optional<Integer> hashChannel,
             OperatorContext operatorContext,
             DataSize maxPartialMemory,
-            JoinCompiler joinCompiler)
+            JoinCompiler joinCompiler,
+            boolean yieldForMemoryReservation)
     {
         this(accumulatorFactories,
                 step,
@@ -79,7 +86,8 @@ public class InMemoryHashAggregationBuilder
                 operatorContext,
                 maxPartialMemory,
                 Optional.empty(),
-                joinCompiler);
+                joinCompiler,
+                yieldForMemoryReservation);
     }
 
     public InMemoryHashAggregationBuilder(
@@ -92,13 +100,35 @@ public class InMemoryHashAggregationBuilder
             OperatorContext operatorContext,
             DataSize maxPartialMemory,
             Optional<Integer> overwriteIntermediateChannelOffset,
-            JoinCompiler joinCompiler)
+            JoinCompiler joinCompiler,
+            boolean yieldForMemoryReservation)
     {
-        this.groupByHash = createGroupByHash(operatorContext.getSession(), groupByTypes, Ints.toArray(groupByChannels), hashChannel, expectedGroups, joinCompiler);
+        UpdateMemory updateMemory;
+        if (yieldForMemoryReservation) {
+            updateMemory = this::updateMemoryWithYieldInfo;
+        }
+        else {
+            // Report memory usage but do not yield for memory.
+            // This is specially used for spillable hash aggregation operator.
+            // TODO: revisit this when spillable hash aggregation operator is turned on
+            updateMemory = () -> {
+                updateMemoryWithYieldInfo();
+                return true;
+            };
+        }
+        this.groupByHash = createGroupByHash(
+                groupByTypes,
+                Ints.toArray(groupByChannels),
+                hashChannel,
+                expectedGroups,
+                isDictionaryAggregationEnabled(operatorContext.getSession()),
+                joinCompiler,
+                updateMemory);
         this.operatorContext = operatorContext;
         this.partial = step.isOutputPartial();
         this.maxPartialMemory = maxPartialMemory.toBytes();
-        this.systemMemoryContext = operatorContext.getSystemMemoryContext().newLocalMemoryContext();
+        this.systemMemoryContext = operatorContext.newLocalSystemMemoryContext();
+        this.localUserMemoryContext = operatorContext.localUserMemoryContext();
 
         // wrapper each function with an aggregator
         ImmutableList.Builder<Aggregator> builder = ImmutableList.builder();
@@ -121,36 +151,33 @@ public class InMemoryHashAggregationBuilder
             systemMemoryContext.setBytes(0);
         }
         else {
-            operatorContext.setMemoryReservation(0);
+            localUserMemoryContext.setBytes(0);
         }
     }
 
     @Override
-    public void processPage(Page page)
+    public Work<?> processPage(Page page)
     {
         if (aggregators.isEmpty()) {
-            groupByHash.addPage(page);
+            return groupByHash.addPage(page);
         }
         else {
-            GroupByIdBlock groupIds = groupByHash.getGroupIds(page);
-
-            for (Aggregator aggregator : aggregators) {
-                aggregator.processPage(groupIds, page);
-            }
+            return new TransformWork<>(
+                    groupByHash.getGroupIds(page),
+                    groupByIdBlock -> {
+                        for (Aggregator aggregator : aggregators) {
+                            aggregator.processPage(groupByIdBlock, page);
+                        }
+                        // we do not need any output from TransformWork for this case
+                        return null;
+                    });
         }
     }
 
     @Override
     public void updateMemory()
     {
-        long memorySize = getSizeInMemory();
-        if (partial) {
-            systemMemoryContext.setBytes(memorySize);
-            full = (memorySize > maxPartialMemory);
-        }
-        else {
-            operatorContext.setMemoryReservation(memorySize);
-        }
+        updateMemoryWithYieldInfo();
     }
 
     @Override
@@ -223,12 +250,15 @@ public class InMemoryHashAggregationBuilder
     }
 
     @Override
-    public Iterator<Page> buildResult()
+    public WorkProcessor<Page> buildResult()
     {
+        for (Aggregator aggregator : aggregators) {
+            aggregator.prepareFinal();
+        }
         return buildResult(consecutiveGroupIds());
     }
 
-    public Iterator<Page> buildHashSortedResult()
+    public WorkProcessor<Page> buildHashSortedResult()
     {
         return buildResult(hashSortedGroupIds());
     }
@@ -242,37 +272,38 @@ public class InMemoryHashAggregationBuilder
         return types;
     }
 
-    private Iterator<Page> buildResult(IntIterator groupIds)
+    @VisibleForTesting
+    public int getCapacity()
+    {
+        return groupByHash.getCapacity();
+    }
+
+    private WorkProcessor<Page> buildResult(IntIterator groupIds)
     {
         final PageBuilder pageBuilder = new PageBuilder(buildTypes());
-        return new AbstractIterator<Page>()
-        {
-            @Override
-            protected Page computeNext()
-            {
-                if (!groupIds.hasNext()) {
-                    return endOfData();
-                }
-
-                pageBuilder.reset();
-
-                List<Type> types = groupByHash.getTypes();
-                while (!pageBuilder.isFull() && groupIds.hasNext()) {
-                    int groupId = groupIds.nextInt();
-
-                    groupByHash.appendValuesTo(groupId, pageBuilder, 0);
-
-                    pageBuilder.declarePosition();
-                    for (int i = 0; i < aggregators.size(); i++) {
-                        Aggregator aggregator = aggregators.get(i);
-                        BlockBuilder output = pageBuilder.getBlockBuilder(types.size() + i);
-                        aggregator.evaluate(groupId, output);
-                    }
-                }
-
-                return pageBuilder.build();
+        return WorkProcessor.create(() -> {
+            if (!groupIds.hasNext()) {
+                return ProcessorState.finished();
             }
-        };
+
+            pageBuilder.reset();
+
+            List<Type> types = groupByHash.getTypes();
+            while (!pageBuilder.isFull() && groupIds.hasNext()) {
+                int groupId = groupIds.nextInt();
+
+                groupByHash.appendValuesTo(groupId, pageBuilder, 0);
+
+                pageBuilder.declarePosition();
+                for (int i = 0; i < aggregators.size(); i++) {
+                    Aggregator aggregator = aggregators.get(i);
+                    BlockBuilder output = pageBuilder.getBlockBuilder(types.size() + i);
+                    aggregator.evaluate(groupId, output);
+                }
+            }
+
+            return ProcessorState.ofResult(pageBuilder.build());
+        });
     }
 
     public List<Type> buildTypes()
@@ -282,6 +313,29 @@ public class InMemoryHashAggregationBuilder
             types.add(aggregator.getType());
         }
         return types;
+    }
+
+    /**
+     * Update memory usage with extra memory needed.
+     *
+     * @return true to if the reservation is within the limit
+     */
+    // TODO: update in the interface after the new memory tracking framework is landed
+    // Essentially we would love to have clean interfaces to support both pushing and pulling memory usage
+    // The following implementation is a hybrid model, where the push model is going to call the pull model causing reentrancy
+    private boolean updateMemoryWithYieldInfo()
+    {
+        long memorySize = getSizeInMemory();
+        if (partial) {
+            systemMemoryContext.setBytes(memorySize);
+            full = (memorySize > maxPartialMemory);
+            return true;
+        }
+        // Operator/driver will be blocked on memory after we call setBytes.
+        // If memory is not available, once we return, this operator will be blocked until memory is available.
+        localUserMemoryContext.setBytes(memorySize);
+        // If memory is not available, inform the caller that we cannot proceed for allocation.
+        return operatorContext.isWaitingForMemory().isDone();
     }
 
     private IntIterator consecutiveGroupIds()
@@ -303,7 +357,7 @@ public class InMemoryHashAggregationBuilder
         return new AbstractIntIterator()
         {
             private final int totalPositions = groupByHash.getGroupCount();
-            private int position = 0;
+            private int position;
 
             @Override
             public boolean hasNext()
@@ -366,6 +420,11 @@ public class InMemoryHashAggregationBuilder
             else {
                 aggregation.addIntermediate(groupIds, page.getBlock(intermediateChannel));
             }
+        }
+
+        public void prepareFinal()
+        {
+            aggregation.prepareFinal();
         }
 
         public void evaluate(int groupId, BlockBuilder output)

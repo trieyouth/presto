@@ -37,19 +37,24 @@ import com.facebook.presto.operator.project.PageProjection;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorPageSource;
 import com.facebook.presto.spi.ConnectorSplit;
+import com.facebook.presto.spi.ErrorCodeSupplier;
 import com.facebook.presto.spi.FixedPageSource;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.InMemoryRecordSet;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.RecordPageSource;
 import com.facebook.presto.spi.RecordSet;
+import com.facebook.presto.spi.StandardErrorCode;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.TimeZoneKey;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.split.PageSourceProvider;
 import com.facebook.presto.sql.analyzer.ExpressionAnalysis;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
+import com.facebook.presto.sql.analyzer.SemanticErrorCode;
+import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.gen.ExpressionCompiler;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.Symbol;
@@ -67,6 +72,7 @@ import com.facebook.presto.sql.tree.SymbolReference;
 import com.facebook.presto.testing.LocalQueryRunner;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.testing.TestingTransactionHandle;
+import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -74,6 +80,7 @@ import com.google.common.collect.Iterators;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.airlift.units.DataSize;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.openjdk.jol.info.ClassLayout;
@@ -101,6 +108,9 @@ import static com.facebook.presto.block.BlockAssertions.createSlicesBlock;
 import static com.facebook.presto.block.BlockAssertions.createStringsBlock;
 import static com.facebook.presto.block.BlockAssertions.createTimestampsWithTimezoneBlock;
 import static com.facebook.presto.metadata.FunctionKind.SCALAR;
+import static com.facebook.presto.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
+import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static com.facebook.presto.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.spi.type.DateTimeEncoding.packDateTimeWithZone;
@@ -110,6 +120,7 @@ import static com.facebook.presto.spi.type.TimestampWithTimeZoneType.TIMESTAMP_W
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
+import static com.facebook.presto.sql.ParsingUtil.createParsingOptions;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.analyzeExpressionsWithSymbols;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypesFromInput;
 import static com.facebook.presto.sql.planner.iterative.rule.CanonicalizeExpressionRewriter.canonicalizeExpression;
@@ -117,9 +128,11 @@ import static com.facebook.presto.sql.relational.Expressions.constant;
 import static com.facebook.presto.sql.relational.SqlToRowExpressionTranslator.translate;
 import static com.facebook.presto.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
+import static com.facebook.presto.type.UnknownType.UNKNOWN;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.testing.Assertions.assertInstanceOf;
+import static io.airlift.units.DataSize.Unit.BYTE;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
@@ -217,6 +230,11 @@ public final class FunctionAssertions
         compiler = runner.getExpressionCompiler();
     }
 
+    public TypeRegistry getTypeRegistry()
+    {
+        return runner.getTypeManager();
+    }
+
     public Metadata getMetadata()
     {
         return metadata;
@@ -291,12 +309,159 @@ public final class FunctionAssertions
         return Iterables.getOnlyElement(resultSet);
     }
 
+    // this is not safe as it catches all RuntimeExceptions
+    @Deprecated
+    public void assertInvalidFunction(String projection)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail("Expected to fail");
+        }
+        catch (RuntimeException e) {
+            // Expected
+        }
+    }
+
+    public void assertInvalidFunction(String projection, StandardErrorCode errorCode, String messagePattern)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail("Expected to throw a PrestoException with message matching " + messagePattern);
+        }
+        catch (PrestoException e) {
+            try {
+                assertEquals(e.getErrorCode(), errorCode.toErrorCode());
+                assertTrue(e.getMessage().equals(messagePattern) || e.getMessage().matches(messagePattern));
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertInvalidFunction(String projection, String messagePattern)
+    {
+        assertInvalidFunction(projection, INVALID_FUNCTION_ARGUMENT, messagePattern);
+    }
+
+    public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception", expectedErrorCode));
+        }
+        catch (SemanticException e) {
+            try {
+                assertEquals(e.getCode(), expectedErrorCode);
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode, String message)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception", expectedErrorCode));
+        }
+        catch (SemanticException e) {
+            try {
+                assertEquals(e.getCode(), expectedErrorCode);
+                assertEquals(e.getMessage(), message);
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertInvalidFunction(String projection, ErrorCodeSupplier expectedErrorCode)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception", expectedErrorCode.toErrorCode()));
+        }
+        catch (PrestoException e) {
+            try {
+                assertEquals(e.getErrorCode(), expectedErrorCode.toErrorCode());
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertNumericOverflow(String projection, String message)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail("Expected to throw an NUMERIC_VALUE_OUT_OF_RANGE exception with message " + message);
+        }
+        catch (PrestoException e) {
+            try {
+                assertEquals(e.getErrorCode(), NUMERIC_VALUE_OUT_OF_RANGE.toErrorCode());
+                assertEquals(e.getMessage(), message);
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertInvalidCast(String projection)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
+        }
+        catch (PrestoException e) {
+            try {
+                assertEquals(e.getErrorCode(), INVALID_CAST_ARGUMENT.toErrorCode());
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    public void assertInvalidCast(String projection, String message)
+    {
+        try {
+            evaluateInvalid(projection);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
+        }
+        catch (PrestoException e) {
+            try {
+                assertEquals(e.getErrorCode(), INVALID_CAST_ARGUMENT.toErrorCode());
+                assertEquals(e.getMessage(), message);
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
+    private void evaluateInvalid(String projection)
+    {
+        // type isn't necessary as the function is not valid
+        selectSingleValue(projection, UNKNOWN, compiler);
+    }
+
     public void assertCachedInstanceHasBoundedRetainedSize(String projection)
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(projection, metadata, SYMBOL_TYPES);
-        RowExpression projectionRowExpression = toRowExpression(projectionExpression);
+        Expression projectionExpression = createExpression(session, projection, metadata, SYMBOL_TYPES);
+        RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
         PageProcessor processor = compiler.compilePageProcessor(Optional.empty(), ImmutableList.of(projectionRowExpression)).get();
 
         // This is a heuristic to detect whether the retained size of cachedInstance is bounded.
@@ -406,12 +571,11 @@ public final class FunctionAssertions
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(projection, metadata, SYMBOL_TYPES);
-        RowExpression projectionRowExpression = toRowExpression(projectionExpression);
+        Expression projectionExpression = createExpression(session, projection, metadata, SYMBOL_TYPES);
+        RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
 
         List<Object> results = new ArrayList<>();
 
-        //
         // If the projection does not need bound values, execute query using full engine
         if (!needsBoundValue(projectionExpression)) {
             MaterializedResult result = runner.execute("SELECT " + projection);
@@ -424,24 +588,21 @@ public final class FunctionAssertions
 
         // execute as standalone operator
         OperatorFactory operatorFactory = compileFilterProject(Optional.empty(), projectionRowExpression, compiler);
-        assertType(operatorFactory.getTypes(), expectedType);
-        Object directOperatorValue = selectSingleValue(operatorFactory, session);
+        Object directOperatorValue = selectSingleValue(operatorFactory, expectedType, session);
         results.add(directOperatorValue);
 
         // interpret
-        Operator interpretedFilterProject = interpretedFilterProject(Optional.empty(), projectionExpression, session);
-        assertType(interpretedFilterProject.getTypes(), expectedType);
-        Object interpretedValue = selectSingleValue(interpretedFilterProject);
+        Operator interpretedFilterProject = interpretedFilterProject(Optional.empty(), projectionExpression, expectedType, session);
+        Object interpretedValue = selectSingleValue(interpretedFilterProject, expectedType);
         results.add(interpretedValue);
 
         // execute over normal operator
         SourceOperatorFactory scanProjectOperatorFactory = compileScanFilterProject(Optional.empty(), projectionRowExpression, compiler);
-        assertType(scanProjectOperatorFactory.getTypes(), expectedType);
-        Object scanOperatorValue = selectSingleValue(scanProjectOperatorFactory, createNormalSplit(), session);
+        Object scanOperatorValue = selectSingleValue(scanProjectOperatorFactory, expectedType, createNormalSplit(), session);
         results.add(scanOperatorValue);
 
         // execute over record set
-        Object recordValue = selectSingleValue(scanProjectOperatorFactory, createRecordSetSplit(), session);
+        Object recordValue = selectSingleValue(scanProjectOperatorFactory, expectedType, createRecordSetSplit(), session);
         results.add(recordValue);
 
         //
@@ -455,14 +616,16 @@ public final class FunctionAssertions
             results.add(queryResult);
         }
 
+        // validate type at end since some tests expect failure and for those UNKNOWN is used instead of actual type
+        assertEquals(projectionRowExpression.getType(), expectedType);
         return results;
     }
 
-    private RowExpression toRowExpression(Expression projectionExpression)
+    private RowExpression toRowExpression(Session session, Expression projectionExpression)
     {
         Expression translatedProjection = new SymbolToInputRewriter(INPUT_MAPPING).rewrite(projectionExpression);
         Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypesFromInput(
-                TEST_SESSION,
+                session,
                 metadata,
                 SQL_PARSER,
                 INPUT_TYPES,
@@ -471,28 +634,27 @@ public final class FunctionAssertions
         return toRowExpression(translatedProjection, expressionTypes);
     }
 
-    private Object selectSingleValue(OperatorFactory operatorFactory, Session session)
+    private Object selectSingleValue(OperatorFactory operatorFactory, Type type, Session session)
     {
         Operator operator = operatorFactory.createOperator(createDriverContext(session));
-        return selectSingleValue(operator);
+        return selectSingleValue(operator, type);
     }
 
-    private Object selectSingleValue(SourceOperatorFactory operatorFactory, Split split, Session session)
+    private Object selectSingleValue(SourceOperatorFactory operatorFactory, Type type, Split split, Session session)
     {
         SourceOperator operator = operatorFactory.createOperator(createDriverContext(session));
         operator.addSplit(split);
         operator.noMoreSplits();
-        return selectSingleValue(operator);
+        return selectSingleValue(operator, type);
     }
 
-    private Object selectSingleValue(Operator operator)
+    private Object selectSingleValue(Operator operator, Type type)
     {
         Page output = getAtMostOnePage(operator, SOURCE_PAGE);
 
         assertNotNull(output);
         assertEquals(output.getPositionCount(), 1);
         assertEquals(output.getChannelCount(), 1);
-        Type type = operator.getTypes().get(0);
 
         Block block = output.getBlock(0);
         assertEquals(block.getPositionCount(), 1);
@@ -520,8 +682,8 @@ public final class FunctionAssertions
     {
         requireNonNull(filter, "filter is null");
 
-        Expression filterExpression = createExpression(filter, metadata, SYMBOL_TYPES);
-        RowExpression filterRowExpression = toRowExpression(filterExpression);
+        Expression filterExpression = createExpression(session, filter, metadata, SYMBOL_TYPES);
+        RowExpression filterRowExpression = toRowExpression(session, filterExpression);
 
         List<Boolean> results = new ArrayList<>();
 
@@ -536,7 +698,7 @@ public final class FunctionAssertions
         }
 
         // interpret
-        boolean interpretedValue = executeFilter(interpretedFilterProject(Optional.of(filterExpression), TRUE_LITERAL, session));
+        boolean interpretedValue = executeFilter(interpretedFilterProject(Optional.of(filterExpression), TRUE_LITERAL, BOOLEAN, session));
         results.add(interpretedValue);
 
         // execute over normal operator
@@ -570,12 +732,17 @@ public final class FunctionAssertions
 
     public static Expression createExpression(String expression, Metadata metadata, Map<Symbol, Type> symbolTypes)
     {
-        Expression parsedExpression = SQL_PARSER.createExpression(expression);
+        return createExpression(TEST_SESSION, expression, metadata, symbolTypes);
+    }
+
+    public static Expression createExpression(Session session, String expression, Metadata metadata, Map<Symbol, Type> symbolTypes)
+    {
+        Expression parsedExpression = SQL_PARSER.createExpression(expression, createParsingOptions(session));
 
         parsedExpression = rewriteIdentifiersToSymbolReferences(parsedExpression);
 
         final ExpressionAnalysis analysis = analyzeExpressionsWithSymbols(
-                TEST_SESSION,
+                session,
                 metadata,
                 SQL_PARSER,
                 symbolTypes,
@@ -652,7 +819,7 @@ public final class FunctionAssertions
             assertEquals(page.getPositionCount(), 1);
             assertEquals(page.getChannelCount(), 1);
 
-            assertTrue(operator.getTypes().get(0).getBoolean(page.getBlock(0), 0));
+            assertTrue(BOOLEAN.getBoolean(page.getBlock(0), 0));
             value = true;
         }
         else {
@@ -693,7 +860,7 @@ public final class FunctionAssertions
         return hasSymbolReferences.get();
     }
 
-    private Operator interpretedFilterProject(Optional<Expression> filter, Expression projection, Session session)
+    private Operator interpretedFilterProject(Optional<Expression> filter, Expression projection, Type expectedType, Session session)
     {
         Optional<PageFilter> pageFilter = filter
                 .map(expression -> new InterpretedPageFilter(
@@ -705,13 +872,16 @@ public final class FunctionAssertions
                         session));
 
         PageProjection pageProjection = new InterpretedPageProjection(projection, SYMBOL_TYPES, INPUT_MAPPING, metadata, SQL_PARSER, session);
+        assertEquals(pageProjection.getType(), expectedType);
 
         PageProcessor processor = new PageProcessor(pageFilter, ImmutableList.of(pageProjection));
         OperatorFactory operatorFactory = new FilterAndProjectOperatorFactory(
                 0,
                 new PlanNodeId("test"),
                 () -> processor,
-                ImmutableList.of(pageProjection.getType()));
+                ImmutableList.of(pageProjection.getType()),
+                new DataSize(0, BYTE),
+                0);
         return operatorFactory.createOperator(createDriverContext(session));
     }
 
@@ -720,7 +890,7 @@ public final class FunctionAssertions
         try {
             Supplier<PageProcessor> processor = compiler.compilePageProcessor(Optional.of(filter), ImmutableList.of());
 
-            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of());
+            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(), new DataSize(0, BYTE), 0);
         }
         catch (Throwable e) {
             if (e instanceof UncheckedExecutionException) {
@@ -734,7 +904,7 @@ public final class FunctionAssertions
     {
         try {
             Supplier<PageProcessor> processor = compiler.compilePageProcessor(filter, ImmutableList.of(projection));
-            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(projection.getType()));
+            return new FilterAndProjectOperatorFactory(0, new PlanNodeId("test"), processor, ImmutableList.of(projection.getType()), new DataSize(0, BYTE), 0);
         }
         catch (Throwable e) {
             if (e instanceof UncheckedExecutionException) {
@@ -764,7 +934,9 @@ public final class FunctionAssertions
                     cursorProcessor,
                     pageProcessor,
                     ImmutableList.of(),
-                    ImmutableList.of(projection.getType()));
+                    ImmutableList.of(projection.getType()),
+                    new DataSize(0, BYTE),
+                    0);
         }
         catch (Throwable e) {
             if (e instanceof UncheckedExecutionException) {
@@ -819,6 +991,11 @@ public final class FunctionAssertions
         assertTrue(types.size() == 1, "Expected one type, but got " + types);
         Type actualType = types.get(0);
         assertEquals(actualType, expectedType);
+    }
+
+    public Session getSession()
+    {
+        return session;
     }
 
     @Override
